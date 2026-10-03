@@ -13,6 +13,7 @@
 
 #include "gateway/api_connection.hpp"
 #include "gateway/callback_endpoint.hpp"
+#include "gateway/echo_api.hpp"
 #include "gateway/frame_io.hpp"
 #include "gateway/hash.hpp"
 #include "gateway/inner_rpc_error.hpp"
@@ -33,37 +34,6 @@ using namespace waos::gateway;
 using namespace boost::ut;
 
 namespace {
-
-  struct echo_service {
-    static std::uint64_t echo(std::uint64_t x) {
-      return x;
-    }
-  };
-
-  struct buffer_pair {
-    circular_buffer a_to_b{};
-    circular_buffer b_to_a{};
-
-    explicit buffer_pair(std::size_t buf_size = 4096) {
-      circular_buffer_init(&a_to_b, buf_size, nullptr);
-      circular_buffer_init(&b_to_a, buf_size, nullptr);
-    }
-
-    ~buffer_pair() {
-      circular_buffer_deinit(&a_to_b);
-      circular_buffer_deinit(&b_to_a);
-    }
-
-    buffer_pair(const buffer_pair&) = delete;
-    buffer_pair& operator=(const buffer_pair&) = delete;
-  };
-
-  binary make_echo_blob() {
-    type_registry registry(true);
-    type_description::create(echo_service{}, registry);
-    const std::string bytes = serialize_type_registry_blob(registry);
-    return binary(bytes.begin(), bytes.end());
-  }
 
   binary pack_hidden_ids(std::initializer_list<std::uint32_t> ids) {
     binary out;
@@ -86,30 +56,6 @@ namespace {
       return e.what();
     }
   }
-
-  struct echo_endpoint {
-    buffer_pair buffers;
-    echo_service svc;
-    flat_buffer_socket_rpc_server server;
-    std::shared_ptr<callback_endpoint_ref> ep;
-    bool called = false;
-
-    echo_endpoint()
-      : server(buffer_transport(&buffers.a_to_b, &buffers.b_to_a)),
-        ep(std::make_shared<callback_endpoint_ref>()) {
-      server.register_basic_types();
-      server.register_recursive(svc);
-      server.channel().register_exception_type<std::runtime_error>();
-      ep->set_sink([this](binary payload) {
-        called = true;
-        write_all(&buffers.a_to_b, payload.data(), payload.size());
-        server.handle_data();
-        for(auto& frame : drain_frames(&buffers.b_to_a)) {
-          ep->emit(std::move(frame));
-        }
-      });
-    }
-  };
 
   void mux_roundtrip(socket_loopback_pair& sockets, auto& client, auto& server) {
     sockets.transfer(sockets.s1, sockets.s0);

@@ -26,6 +26,10 @@ namespace waos {
       server.register_object_method(sess, &session::list_apis);
       server.register_object_method(sess, &session::get_rpc_description);
       server.register_object_method(sess, &session::get_session_description);
+      server.register_object_method(sess, &session::set_reference);
+      server.register_object_method(sess, &session::observe_reference);
+      server.register_object_method(sess, &session::unobserve_reference);
+      server.register_object_method(sess, &session::dispose_reference);
     }
 
     template <typename Server>

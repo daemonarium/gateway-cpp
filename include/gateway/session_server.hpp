@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gateway/endpoint_ref.hpp"
+#include "gateway/expr.hpp"
 #include "gateway/frame_io.hpp"
 #include "gateway/inner_rpc_error.hpp"
 #include "gateway/session.hpp"
@@ -53,6 +54,12 @@ namespace waos {
               endpoints_[p.api_id] = std::move(p.endpoint);
             }
           }
+          sess_.set_observation_hooks(
+            [this](std::uint64_t ref_id, const expr& value) { on_set_reference(ref_id, value); },
+            [this](std::uint64_t ref_id) { on_observe_reference(ref_id); },
+            [this](std::uint64_t ref_id) { on_unobserve_reference(ref_id); },
+            [this](std::uint64_t ref_id) { on_dispose_reference(ref_id); }
+          );
           attach_session(rpc_, sess_);
           rpc_.template on_message<api_message>(
             std::function<void(api_message&, size_t)>([this](api_message& msg, size_t payload_size) {
@@ -79,8 +86,18 @@ namespace waos {
         session& sess() { return sess_; }
 
       private:
+        struct ref_slot {
+          std::uint64_t stream_id = 0;
+          std::uint32_t api_id = 0;
+          bool observed = false;
+          std::vector<binary> pending;
+        };
+
         session sess_;
         std::map<std::uint32_t, std::shared_ptr<endpoint_ref>> endpoints_;
+        std::map<std::uint64_t, ref_slot> refs_;
+        std::map<std::uint64_t, std::uint64_t> stream_to_ref_;
+        std::uint64_t next_stream_id_ = 1;
         rpc_type rpc_;
 
         void bind_endpoint_handlers() {
@@ -90,11 +107,29 @@ namespace waos {
               if(!sess_.ready()) {
                 return;
               }
-              auto& writer = rpc_.channel().begin_send(api_message{api_id});
-              if(!payload.empty()) {
-                writer.write_raw(payload.data(), payload.size());
+              auto type_index = read_inner_type_index(payload);
+              if(!type_index || !is_inner_stream_event(*type_index)) {
+                send_api_message(api_id, payload);
+                return;
               }
-              rpc_.channel().commit_send();
+              auto stream_id = read_inner_stream_id(payload);
+              if(!stream_id) {
+                return;
+              }
+              auto ref_it = stream_to_ref_.find(*stream_id);
+              if(ref_it == stream_to_ref_.end()) {
+                return;
+              }
+              auto slot_it = refs_.find(ref_it->second);
+              if(slot_it == refs_.end()) {
+                return;
+              }
+              binary rewritten = rewrite_inner_stream_id(std::move(payload), ref_it->second);
+              if(!slot_it->second.observed) {
+                slot_it->second.pending.push_back(std::move(rewritten));
+                return;
+              }
+              send_api_message(api_id, rewritten);
             });
           }
         }
@@ -104,7 +139,12 @@ namespace waos {
           if(payload_size > 0) {
             rpc_.channel().reader().read_raw(payload.data(), payload_size);
           }
-          if(!peek_inner_rpc_request_id(payload)) {
+          if(!is_forwarded_inner_frame(payload)) {
+            return;
+          }
+          auto type_index = read_inner_type_index(payload);
+          if(type_index && *type_index == inner_stream_cancel) {
+            forward_cancel(msg.api_id, payload);
             return;
           }
           const char* err = nullptr;
@@ -124,6 +164,85 @@ namespace waos {
             }
           }
           reply_inner_error(msg.api_id, payload, err);
+        }
+
+        void on_set_reference(std::uint64_t ref_id, const expr& value) {
+          direct_call call = validate_direct_expr(value);
+          drop_ref(ref_id);
+          std::uint64_t stream_id = next_stream_id_++;
+          ref_slot slot;
+          slot.stream_id = stream_id;
+          slot.api_id = call.api_id;
+          refs_[ref_id] = slot;
+          stream_to_ref_[stream_id] = ref_id;
+          auto it = endpoints_.find(call.api_id);
+          if(it == endpoints_.end() || !it->second) {
+            throw std::runtime_error(error_unknown_api);
+          }
+          it->second->start_stream(stream_id, call.function_id, call.literals);
+        }
+
+        void on_observe_reference(std::uint64_t ref_id) {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return;
+          }
+          it->second.observed = true;
+          std::vector<binary> queued = std::move(it->second.pending);
+          it->second.pending.clear();
+          for(const binary& frame : queued) {
+            send_api_message(it->second.api_id, frame);
+          }
+        }
+
+        void on_unobserve_reference(std::uint64_t ref_id) {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return;
+          }
+          it->second.observed = false;
+        }
+
+        void on_dispose_reference(std::uint64_t ref_id) {
+          drop_ref(ref_id);
+        }
+
+        void drop_ref(std::uint64_t ref_id) {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return;
+          }
+          ref_slot slot = std::move(it->second);
+          refs_.erase(it);
+          stream_to_ref_.erase(slot.stream_id);
+          auto ep = endpoints_.find(slot.api_id);
+          if(ep != endpoints_.end() && ep->second) {
+            ep->second->cancel_stream(slot.stream_id);
+          }
+        }
+
+        void forward_cancel(std::uint32_t api_id, const binary& payload) {
+          auto ref_id = read_inner_stream_id(payload);
+          if(!ref_id) {
+            return;
+          }
+          auto it = refs_.find(*ref_id);
+          if(it == refs_.end() || it->second.api_id != api_id) {
+            return;
+          }
+          auto ep = endpoints_.find(api_id);
+          if(ep == endpoints_.end() || !ep->second) {
+            return;
+          }
+          ep->second->send_message(rewrite_inner_stream_id(payload, it->second.stream_id));
+        }
+
+        void send_api_message(std::uint32_t api_id, const binary& payload) {
+          auto& writer = rpc_.channel().begin_send(api_message{api_id});
+          if(!payload.empty()) {
+            writer.write_raw(payload.data(), payload.size());
+          }
+          rpc_.channel().commit_send();
         }
 
         void reply_inner_error(std::uint32_t api_id, const binary& inner_request, const char* message) {

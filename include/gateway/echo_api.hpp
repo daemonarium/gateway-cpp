@@ -4,6 +4,7 @@
 #include "gateway/frame_io.hpp"
 #include "gateway/types.hpp"
 
+#include "examples/structures/stream_protocol.hpp"
 #include "serialization/socket_rpc_server.hpp"
 #include "serialization/socket_transport.hpp"
 #include "serialization/type_description.hpp"
@@ -30,6 +31,26 @@ namespace waos {
     inline binary make_echo_blob() {
       serialization::type_registry registry(true);
       serialization::type_description::create(echo_service{}, registry);
+      const std::string bytes = serialization::serialize_type_registry_blob(registry);
+      return binary(bytes.begin(), bytes.end());
+    }
+
+    class stream_endpoint;
+
+    // function_id by declaration order: 0 echo_stream, 1 echo_fail, 2 echo_reset, 3 echo_mark.
+    struct echo_stream_service {
+      [[=serialization::policy::ignore]]
+      stream_endpoint* owner = nullptr;
+
+      void echo_stream(stream_handle handle, std::uint64_t key, std::uint64_t count);
+      void echo_fail(stream_handle handle);
+      void echo_reset(stream_handle handle);
+      void echo_mark(stream_handle handle, std::uint64_t key);
+    };
+
+    inline binary make_stream_blob() {
+      serialization::type_registry registry(true);
+      serialization::type_description::create(echo_stream_service{}, registry);
       const std::string bytes = serialization::serialize_type_registry_blob(registry);
       return binary(bytes.begin(), bytes.end());
     }

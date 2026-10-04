@@ -15,9 +15,20 @@ namespace waos {
     constexpr std::uint64_t protocol_version_v1 = 1;
     constexpr std::uint32_t session_api_id = 0;
 
+    constexpr std::uint64_t fn_hello = 0;
+    constexpr std::uint64_t fn_list_apis = 1;
+    constexpr std::uint64_t fn_get_rpc_description = 2;
+    constexpr std::uint64_t fn_get_session_description = 3;
+    constexpr std::uint64_t fn_set_reference = 4;
+    constexpr std::uint64_t fn_observe_reference = 5;
+    constexpr std::uint64_t fn_unobserve_reference = 6;
+    constexpr std::uint64_t fn_dispose_reference = 7;
+
     constexpr const char* error_handshake_required = "handshake_required";
     constexpr const char* error_unsupported_protocol_version = "unsupported_protocol_version";
     constexpr const char* error_unknown_api = "unknown_api";
+    constexpr const char* error_dependent_ref_not_supported = "dependent_ref_not_supported";
+    constexpr const char* error_unknown_expr = "unknown_expr";
 
     using binary = serialization::binary;
     using auth_map = std::map<std::string, binary>;

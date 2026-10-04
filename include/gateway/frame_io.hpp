@@ -55,18 +55,83 @@ namespace waos {
       return frames;
     }
 
-    inline std::optional<std::uint64_t> peek_inner_rpc_request_id(const binary& payload) {
-      if(payload.size() < 20) {
+    // Inner channel indexes after register_basic_types + register_inner_stream_messages.
+    constexpr std::uint32_t inner_rpc_request = 0;
+    constexpr std::uint32_t inner_rpc_response = 1;
+    constexpr std::uint32_t inner_rpc_error = 2;
+    constexpr std::uint32_t inner_stream_item = 4;
+    constexpr std::uint32_t inner_stream_key = 5;
+    constexpr std::uint32_t inner_stream_done = 6;
+    constexpr std::uint32_t inner_stream_error = 7;
+    constexpr std::uint32_t inner_stream_reset = 8;
+    constexpr std::uint32_t inner_stream_cancel = 9;
+    constexpr std::uint32_t inner_stream_opened = 10;
+
+    inline std::optional<std::uint32_t> read_inner_type_index(const binary& payload) {
+      if(payload.size() < 8) {
         return std::nullopt;
       }
       std::uint32_t type_index = 0;
       std::memcpy(&type_index, payload.data() + 4, sizeof(type_index));
-      if(type_index != 0) {
+      return type_index;
+    }
+
+    inline std::optional<std::uint64_t> peek_inner_rpc_request_id(const binary& payload) {
+      if(payload.size() < 20) {
+        return std::nullopt;
+      }
+      auto type_index = read_inner_type_index(payload);
+      if(!type_index || *type_index != inner_rpc_request) {
         return std::nullopt;
       }
       std::uint64_t request_id = 0;
       std::memcpy(&request_id, payload.data() + 12, sizeof(request_id));
       return request_id;
+    }
+
+    // Client → gateway. rpc_request (one-shot) and stream_cancel (ref_id).
+    inline bool is_forwarded_inner_frame(const binary& payload) {
+      auto type_index = read_inner_type_index(payload);
+      if(!type_index) {
+        return false;
+      }
+      if(*type_index == inner_rpc_request) {
+        return payload.size() >= 20;
+      }
+      if(*type_index == inner_stream_cancel) {
+        return payload.size() >= 8;
+      }
+      return false;
+    }
+
+    inline bool is_inner_stream_event(std::uint32_t type_index) {
+      return type_index == inner_stream_item
+        || type_index == inner_stream_key
+        || type_index == inner_stream_done
+        || type_index == inner_stream_error
+        || type_index == inner_stream_reset
+        || type_index == inner_stream_opened;
+    }
+
+    inline bool is_inner_rpc_result(std::uint32_t type_index) {
+      return type_index == inner_rpc_response || type_index == inner_rpc_error;
+    }
+
+    // stream_id is the first field, at byte 12 (after len, type, encoded_size).
+    inline std::optional<std::uint64_t> read_inner_stream_id(const binary& payload) {
+      if(payload.size() < 20) {
+        return std::nullopt;
+      }
+      std::uint64_t stream_id = 0;
+      std::memcpy(&stream_id, payload.data() + 12, sizeof(stream_id));
+      return stream_id;
+    }
+
+    inline binary rewrite_inner_stream_id(binary payload, std::uint64_t stream_id) {
+      if(payload.size() >= 20) {
+        std::memcpy(payload.data() + 12, &stream_id, sizeof(stream_id));
+      }
+      return payload;
     }
 
   }

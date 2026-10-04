@@ -1,8 +1,10 @@
 #pragma once
 
 #include "gateway/frame_io.hpp"
+#include "gateway/inner_stream.hpp"
 #include "gateway/types.hpp"
 
+#include "observable/stream_multiplexer.hpp"
 #include "serialization/socket_rpc_client.hpp"
 #include "serialization/socket_transport.hpp"
 
@@ -35,6 +37,9 @@ namespace waos {
 
     class api_connection {
       public:
+        using rpc_type = serialization::socket_rpc_client<serialization::flat_materialized_codec, mux_transport>;
+        using mux_type = waos::observable::StreamMultiplexer<rpc_type, rpc_type>;
+
         api_connection(std::uint32_t api_id, std::function<void(binary)> send_outer)
           : api_id_(api_id), send_outer_(std::move(send_outer)) {
           circular_buffer_init(&in_, 4096, nullptr);
@@ -43,12 +48,15 @@ namespace waos {
           inner_.emplace(mux_transport{&in_, &out_, &on_flush_});
           inner_->register_basic_types();
           inner_->channel().template register_exception_type<std::runtime_error>();
+          register_inner_stream_messages(*inner_);
+          mux_.emplace(*inner_, *inner_, std::uint64_t{0}, std::uint32_t{0});
         }
 
         api_connection(const api_connection&) = delete;
         api_connection& operator=(const api_connection&) = delete;
 
         ~api_connection() {
+          mux_.reset();
           inner_.reset();
           circular_buffer_deinit(&in_);
           circular_buffer_deinit(&out_);
@@ -56,8 +64,12 @@ namespace waos {
 
         std::uint32_t api_id() const { return api_id_; }
 
-        serialization::socket_rpc_client<serialization::flat_materialized_codec, mux_transport>& rpc() {
+        rpc_type& rpc() {
           return *inner_;
+        }
+
+        mux_type& mux() {
+          return *mux_;
         }
 
         void deliver(const binary& inner_frame) {
@@ -71,7 +83,8 @@ namespace waos {
         struct circular_buffer in_ {};
         struct circular_buffer out_ {};
         std::function<void()> on_flush_;
-        std::optional<serialization::socket_rpc_client<serialization::flat_materialized_codec, mux_transport>> inner_;
+        std::optional<rpc_type> inner_;
+        std::optional<mux_type> mux_;
 
         void flush_out() {
           for(auto& frame : drain_frames(&out_)) {

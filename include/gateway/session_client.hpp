@@ -1,6 +1,8 @@
 #pragma once
 
 #include "gateway/api_connection.hpp"
+#include "gateway/expr.hpp"
+#include "gateway/reference.hpp"
 #include "gateway/session_rpc.hpp"
 #include "gateway/types.hpp"
 
@@ -95,6 +97,62 @@ namespace waos {
           return rpc_.template call<binary>(3);
         }
 
+        std::shared_ptr<serialization::promise<std::shared_ptr<reference>>> set_reference(
+          std::uint64_t ref_id,
+          expr value
+        ) {
+          auto out = std::make_shared<serialization::promise<std::shared_ptr<reference>>>();
+          auto pending = rpc_.template call<void>(fn_set_reference, ref_id, value);
+          pending->on_resolved([this, ref_id, value, out]() {
+            try {
+              direct_call call = validate_direct_expr(value);
+              auto opened = open_api(call.api_id);
+              opened->on_resolved([this, ref_id, call, out](api_connection*& conn) {
+                try {
+                  out->resolve(adopt_reference(ref_id, call, conn));
+                } catch(...) {
+                  out->reject(std::current_exception());
+                }
+              });
+              opened->on_rejected([out](std::exception_ptr ep) {
+                out->reject(ep);
+              });
+            } catch(...) {
+              out->reject(std::current_exception());
+            }
+          });
+          pending->on_rejected([out](std::exception_ptr ep) {
+            out->reject(ep);
+          });
+          return out;
+        }
+
+        std::shared_ptr<serialization::promise<void>> observe_reference(std::uint64_t ref_id) {
+          return rpc_.template call<void>(fn_observe_reference, ref_id);
+        }
+
+        std::shared_ptr<serialization::promise<void>> unobserve_reference(std::uint64_t ref_id) {
+          return rpc_.template call<void>(fn_unobserve_reference, ref_id);
+        }
+
+        std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint64_t ref_id) {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return rpc_.template call<void>(fn_dispose_reference, ref_id);
+          }
+          auto ref = it->second;
+          refs_.erase(it);
+          return ref->dispose();
+        }
+
+        std::shared_ptr<reference> find_reference(std::uint64_t ref_id) const {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return nullptr;
+          }
+          return it->second;
+        }
+
         std::shared_ptr<serialization::promise<api_connection*>> open_api(
           std::uint32_t api_id,
           std::optional<binary> blob = std::nullopt
@@ -130,6 +188,39 @@ namespace waos {
         std::map<std::uint32_t, binary> hashes_;
         std::map<std::uint32_t, std::pair<binary, binary>> blobs_;
         std::map<std::uint32_t, std::unique_ptr<api_connection>> connections_;
+        std::map<std::uint64_t, std::shared_ptr<reference>> refs_;
+
+        std::shared_ptr<reference> adopt_reference(
+          std::uint64_t ref_id,
+          const direct_call& call,
+          api_connection* conn
+        ) {
+          std::vector<binary> args;
+          args.reserve(call.literals.size());
+          for(const literal_expr& lit : call.literals) {
+            args.push_back(lit.value);
+          }
+          reference_ops ops;
+          ops.observe = [this](std::uint64_t id) {
+            return observe_reference(id);
+          };
+          ops.unobserve = [this](std::uint64_t id) {
+            return unobserve_reference(id);
+          };
+          ops.dispose = [this](std::uint64_t id) {
+            return rpc_.template call<void>(fn_dispose_reference, id);
+          };
+          auto ref = std::make_shared<reference>(
+            ref_id,
+            path{call.api_id, call.function_id, std::move(args)},
+            [conn, ref_id](waos::observable::StreamReceiver* receiver) {
+              conn->mux().attachReceiver(ref_id, receiver);
+            },
+            std::move(ops)
+          );
+          refs_[ref_id] = ref;
+          return ref;
+        }
 
         api_connection& make_connection(std::uint32_t api_id) {
           auto conn = std::make_unique<api_connection>(api_id, [this, api_id](binary frame) {

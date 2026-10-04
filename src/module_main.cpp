@@ -1,6 +1,7 @@
 #include "gateway/echo_api.hpp"
 #include "gateway/session.hpp"
 #include "gateway/session_server.hpp"
+#include "gateway/stream_endpoint.hpp"
 
 #include <utils/socket_handlers.hpp>
 
@@ -18,12 +19,15 @@ using waos::gateway::echo_endpoint;
 using waos::gateway::handshake_data;
 using waos::gateway::make_echo_blob;
 using waos::gateway::make_session_description_blob;
+using waos::gateway::make_stream_blob;
+using waos::gateway::stream_endpoint;
 using waos::gateway::protocol_version_v1;
 using waos::gateway::session_server;
 
 namespace {
 
   std::unique_ptr<echo_endpoint> alpha;
+  std::shared_ptr<stream_endpoint> stream_api;
   std::unique_ptr<echo_endpoint> gamma;
   std::unique_ptr<session_server<>> gateway_server;
 
@@ -64,12 +68,14 @@ extern "C" void start() {
   socket_open(0, &socket_options);
 
   alpha = std::make_unique<echo_endpoint>();
+  stream_api = std::make_shared<stream_endpoint>();
   gamma = std::make_unique<echo_endpoint>();
   waos::gateway::binary blob = make_echo_blob();
   handshake_data handshake;
   handshake.protocol_version = protocol_version_v1;
   std::vector<bound_publication> pubs;
   pubs.push_back({1, "alpha", blob, alpha->ep});
+  pubs.push_back({2, "stream", make_stream_blob(), stream_api});
   pubs.push_back({3, "gamma", blob, gamma->ep});
   gateway_server = std::make_unique<session_server<>>(
     static_cast<std::uint32_t>(0),

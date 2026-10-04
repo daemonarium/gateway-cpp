@@ -49,6 +49,23 @@ if(NOT WASM)
   )
 
   add_test(NAME gateway_session_mux_ut COMMAND gateway_session_mux_ut WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+
+  add_executable(gateway_session_stream_ut
+    src/test/session_stream_ut.cpp
+    ${IO_FILES}
+    ${SOCKET_FILES}
+  )
+  target_include_directories(gateway_session_stream_ut PRIVATE
+    include
+    ${CMAKE_SOURCE_DIR}/cpp-rpc/src
+    ${CMAKE_SOURCE_DIR}/cpp-rpc/src/test
+  )
+  target_link_libraries(gateway_session_stream_ut PRIVATE Boost::ut socket_test_stub)
+  set_target_properties(gateway_session_stream_ut PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+  )
+
+  add_test(NAME gateway_session_stream_ut COMMAND gateway_session_stream_ut WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 endif()
 
 if(WASM)

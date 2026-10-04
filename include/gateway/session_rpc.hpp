@@ -10,11 +10,25 @@
 namespace waos {
   namespace gateway {
 
+    // Pointer targets written by flat write_rest. Order is the wire type index
+    // and must match TS registerSessionPointerCodecs.
+    template <typename Rpc>
+    void register_session_pointer_types(Rpc& rpc) {
+      rpc.channel().template register_dynamic_type<ref_expr>();
+      rpc.channel().template register_dynamic_type<literal_expr>();
+      rpc.channel().template register_dynamic_type<member_expr>();
+      rpc.channel().template register_dynamic_type<call_expr>();
+      rpc.channel().template register_dynamic_type<switch_expr>();
+      rpc.channel().template register_dynamic_type<expr>();
+      rpc.channel().template register_dynamic_type<non_empty_expr>();
+    }
+
     template <typename Rpc>
     void register_session_channel(Rpc& rpc) {
       rpc.register_basic_types();
       rpc.template register_message_type<api_message>();
       rpc.channel().template register_exception_type<std::runtime_error>();
+      register_session_pointer_types(rpc);
     }
 
     template <typename Server>

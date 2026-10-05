@@ -53,8 +53,8 @@ namespace waos {
           state_->set_reference(ref_id, std::move(value));
         }
 
-        virtual std::uint32_t observe_reference(std::uint32_t ref_id) {
-          return state_->observe_reference(ref_id);
+        virtual std::uint32_t observe_reference(std::uint32_t ref_id, std::uint64_t since_timestamp) {
+          return state_->observe_reference(ref_id, since_timestamp);
         }
 
         virtual void unobserve_reference(std::uint32_t ref_id) {
@@ -65,8 +65,12 @@ namespace waos {
           state_->dispose_reference(ref_id);
         }
 
-        virtual std::uint32_t fetch_reference(std::uint32_t ref_id) {
-          return state_->fetch_reference(ref_id);
+        virtual std::uint32_t fetch_reference(
+          std::uint32_t ref_id,
+          std::uint8_t flags,
+          std::uint64_t since_timestamp
+        ) {
+          return state_->fetch_reference(ref_id, flags, since_timestamp);
         }
 
         virtual std::uint32_t open_pipe(std::uint32_t cookie) {
@@ -77,15 +81,20 @@ namespace waos {
           state_->close_pipe(socket_id);
         }
 
+        virtual void close_stream(std::uint32_t socket_id) {
+          state_->close_stream(socket_id);
+        }
+
         [[=serialization::policy::ignore]]
         void set_observation_hooks(
           std::function<void(std::uint32_t, const expr&)> on_set,
-          std::function<std::uint32_t(std::uint32_t)> on_observe,
+          std::function<std::uint32_t(std::uint32_t, std::uint64_t)> on_observe,
           std::function<void(std::uint32_t)> on_unobserve,
           std::function<void(std::uint32_t)> on_dispose,
-          std::function<std::uint32_t(std::uint32_t)> on_fetch,
+          std::function<std::uint32_t(std::uint32_t, std::uint8_t, std::uint64_t)> on_fetch,
           std::function<std::uint32_t(std::uint32_t)> on_open_pipe = {},
-          std::function<void(std::uint32_t)> on_close_pipe = {}
+          std::function<void(std::uint32_t)> on_close_pipe = {},
+          std::function<void(std::uint32_t)> on_close_stream = {}
         ) {
           state_->set_observation_hooks(
             std::move(on_set),
@@ -94,7 +103,8 @@ namespace waos {
             std::move(on_dispose),
             std::move(on_fetch),
             std::move(on_open_pipe),
-            std::move(on_close_pipe)
+            std::move(on_close_pipe),
+            std::move(on_close_stream)
           );
         }
 

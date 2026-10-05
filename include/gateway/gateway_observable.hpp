@@ -1,5 +1,6 @@
 #pragma once
 
+#include "examples/structures/stream_protocol.hpp"
 #include "gateway/types.hpp"
 
 #include "observable/observable.hpp"
@@ -29,12 +30,14 @@ namespace waos {
           std::shared_ptr<waos::observable::ReferenceOps> ops,
           gateway_observe_mode mode,
           std::function<void(std::uint32_t, bool)> set_paused = {},
-          std::function<void(std::uint32_t)> detach = {}
+          std::function<void(std::uint32_t)> detach = {},
+          std::uint64_t since = 0
         )
           : ops_(std::move(ops)),
             mode_(mode),
             set_paused_(std::move(set_paused)),
-            detach_(std::move(detach)) {}
+            detach_(std::move(detach)),
+            since_(since) {}
 
         std::optional<std::uint64_t> last_wire_stream_id() const {
           return last_wire_stream_id_;
@@ -75,8 +78,12 @@ namespace waos {
         void onStart() override {
           attached_ = true;
           if(!ops_) return;
-          if(mode_ == gateway_observe_mode::observe) ops_->observe(this);
-          else ops_->fetch(this);
+          const std::uint64_t since = (mode_ == gateway_observe_mode::observe || started_)
+            ? maxTs()
+            : since_;
+          started_ = true;
+          if(mode_ == gateway_observe_mode::observe) ops_->observe(this, since);
+          else ops_->fetch(this, waos::stream_flags::none, since);
         }
 
         void onStop() override {
@@ -100,6 +107,8 @@ namespace waos {
         gateway_observe_mode mode_ = gateway_observe_mode::observe;
         std::function<void(std::uint32_t, bool)> set_paused_;
         std::function<void(std::uint32_t)> detach_;
+        std::uint64_t since_ = 0;
+        bool started_ = false;
         bool attached_ = false;
         std::optional<std::uint64_t> last_wire_stream_id_;
         std::optional<std::uint32_t> mux_socket_id_;

@@ -12,6 +12,7 @@
 
 #include "test_socket_utils.hpp"
 
+#include "examples/structures/stream_protocol.hpp"
 #include "gateway/expr.hpp"
 #include "gateway/session_client.hpp"
 #include "gateway/session_server.hpp"
@@ -158,6 +159,75 @@ namespace {
     const auto ids = rpc_function_ids(bytes);
     return std::find(ids.begin(), ids.end(), fn) != ids.end();
   }
+
+  struct RpcFrame {
+    std::uint64_t fn = 0;
+    binary frame;
+    std::size_t args_off = 0;
+  };
+
+  std::vector<RpcFrame> rpc_requests(const binary& bytes) {
+    std::vector<RpcFrame> out;
+    std::size_t off = 0;
+    while(off + kFrameLenSize <= bytes.size()) {
+      std::uint32_t len = 0;
+      std::memcpy(&len, bytes.data() + off, sizeof(len));
+      if(off + kFrameLenSize + len > bytes.size()) break;
+      binary frame(
+        bytes.begin() + static_cast<std::ptrdiff_t>(off),
+        bytes.begin() + static_cast<std::ptrdiff_t>(off + kFrameLenSize + len)
+      );
+      std::uint64_t type = 0, request_id = 0, fn = 0;
+      std::size_t a = kFrameLenSize;
+      a += read_uvarint(frame, a, type);
+      if(type == kRpcRequestType) {
+        a += read_uvarint(frame, a, request_id);
+        a += read_uvarint(frame, a, fn);
+        out.push_back(RpcFrame{fn, std::move(frame), a});
+      }
+      off += kFrameLenSize + len;
+    }
+    return out;
+  }
+
+  bool last_observe_since(const binary& bytes, std::uint64_t& since) {
+    auto reqs = rpc_requests(bytes);
+    for(auto it = reqs.rbegin(); it != reqs.rend(); ++it) {
+      if(it->fn != kObserveReferenceFn) continue;
+      std::uint64_t ref = 0;
+      std::size_t a = it->args_off;
+      a += read_uvarint(it->frame, a, ref);
+      read_uvarint(it->frame, a, since);
+      return true;
+    }
+    return false;
+  }
+
+  bool last_fetch_args(const binary& bytes, std::uint8_t& flags, std::uint64_t& since) {
+    auto reqs = rpc_requests(bytes);
+    for(auto it = reqs.rbegin(); it != reqs.rend(); ++it) {
+      if(it->fn != kFetchReferenceFn) continue;
+      std::uint64_t ref = 0;
+      std::size_t a = it->args_off;
+      a += read_uvarint(it->frame, a, ref);
+      if(a >= it->frame.size()) return false;
+      flags = it->frame[a++];
+      read_uvarint(it->frame, a, since);
+      return true;
+    }
+    return false;
+  }
+
+  struct Rec : StreamReceiver {
+    std::size_t items = 0;
+    bool done = false;
+    void onStreamOpened(waos::stream_opened&) override {}
+    void onStreamItem(waos::stream_item&) override { ++items; }
+    void onStreamKey(waos::stream_key&) override {}
+    void onStreamDone(waos::stream_done&) override { done = true; }
+    void onStreamError(waos::stream_error&) override {}
+    void onStreamReset(waos::stream_reset&) override {}
+  };
 
 }
 
@@ -436,15 +506,6 @@ int main() {
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(ref->sum().state() == ObservableState::ready);
     const auto live_id = *ref->last_wire_stream_id();
-    struct Rec : StreamReceiver {
-      std::size_t items = 0;
-      void onStreamOpened(waos::stream_opened&) override {}
-      void onStreamItem(waos::stream_item&) override { ++items; }
-      void onStreamKey(waos::stream_key&) override {}
-      void onStreamDone(waos::stream_done&) override {}
-      void onStreamError(waos::stream_error&) override {}
-      void onStreamReset(waos::stream_reset&) override {}
-    };
     auto rec = std::make_shared<Rec>();
     std::uint32_t fetch_id = 0;
     sockets.client->fetch_reference(7, rec.get())->on_resolved([&](std::uint32_t id) {
@@ -532,5 +593,143 @@ int main() {
       if(u64_from_le(entry.key) == 11) saw = true;
     }
     expect(saw == true);
+  };
+
+  "observe resubscribe sends maxTs as since"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto hold = ref->hold();
+    auto sink = std::make_shared<Sink>();
+    auto sub = ref->observable().subscribe(sink);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->observable().maxTs() != 0_ul);
+    const auto max_ts = ref->observable().maxTs();
+    sub->unsubscribe();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    ref->observable().subscribe(sink);
+    std::uint64_t since = 0;
+    expect(last_observe_since(peek_output(sockets.sockets.s1), since) == true);
+    expect(since == max_ts);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(sockets.ep->last_handle().since_timestamp == max_ts);
+  };
+
+  "fetch_reference forwards flags none and since"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    ref->bind();
+    auto rec = std::make_shared<Rec>();
+    sockets.client->fetch_reference(7, rec.get(), waos::stream_flags::none, 4);
+    std::uint8_t flags = 0xff;
+    std::uint64_t since = 0;
+    expect(last_fetch_args(peek_output(sockets.sockets.s1), flags, since) == true);
+    expect(flags == static_cast<std::uint8_t>(waos::stream_flags::none));
+    expect(since == 4_ul);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(sockets.ep->last_handle().since_timestamp == 4_ul);
+    expect(rec->done == true);
+  };
+
+  "fetch while live bypasses the stream shortcut"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto live_sink = start_live(*ref);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    const auto live_id = *ref->last_wire_stream_id();
+    auto scan = ref->fetch();
+    expect(scan.get() != ref->peekLive().get());
+    auto scan_sink = std::make_shared<Sink>();
+    scan->subscribe(scan_sink);
+    std::uint8_t flags = 0xff;
+    std::uint64_t since = 99;
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kFetchReferenceFn) == true);
+    expect(last_fetch_args(peek_output(sockets.sockets.s1), flags, since) == true);
+    expect(flags == static_cast<std::uint8_t>(waos::stream_flags::none));
+    expect(since == 0_ul);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(scan->state() == ObservableState::ready);
+    expect(sockets.client->socket_mux().has_socket(static_cast<std::uint32_t>(live_id)) == true);
+    BinaryEntry extra;
+    extra.key = u64_to_le(11);
+    extra.value = u64_to_le(11);
+    extra.ts = 11;
+    sockets.ep->push(extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw_live = false;
+    for(const auto& entry : ref->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 11) saw_live = true;
+    }
+    expect(saw_live == true);
+  };
+
+  "stream with since without live forwards since"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto scan_sink = std::make_shared<Sink>();
+    auto scan = ref->stream(5);
+    scan->subscribe(scan_sink);
+    std::uint8_t flags = 0xff;
+    std::uint64_t since = 0;
+    expect(last_fetch_args(peek_output(sockets.sockets.s1), flags, since) == true);
+    expect(flags == static_cast<std::uint8_t>(waos::stream_flags::none));
+    expect(since == 5_ul);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(sockets.ep->last_handle().since_timestamp == 5_ul);
+  };
+
+  "raw scan open_stream auto-closes on done"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto rec = std::make_shared<Rec>();
+    opened_stream opened;
+    ref->open_stream(rec.get(), waos::stream_flags::none, 0)->on_resolved([&](opened_stream s) {
+      opened = std::move(s);
+    });
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(opened.socket_id != 0_u);
+    expect(rec->items > 0_ul);
+    expect(rec->done == true);
+    expect(sockets.client->socket_mux().has_socket(opened.socket_id) == false);
+    expect(ref->peekLive() == nullptr);
+  };
+
+  "raw observe is a separate socket from canonical live"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto hold = ref->hold();
+    auto live_sink = std::make_shared<Sink>();
+    auto live_sub = ref->observable().subscribe(live_sink);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    const auto live_id = *ref->last_wire_stream_id();
+    auto rec = std::make_shared<Rec>();
+    opened_stream raw;
+    ref->open_stream(rec.get(), waos::stream_flags::observe, 0)->on_resolved([&](opened_stream s) {
+      raw = std::move(s);
+    });
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(raw.socket_id != 0_u);
+    expect(raw.socket_id != static_cast<std::uint32_t>(live_id));
+    expect(sockets.client->socket_mux().has_socket(raw.socket_id) == true);
+    const std::size_t before = rec->items;
+    BinaryEntry extra;
+    extra.key = u64_to_le(11);
+    extra.value = u64_to_le(11);
+    extra.ts = 11;
+    sockets.ep->push(extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(rec->items > before);
+    bool saw_live = false;
+    for(const auto& entry : ref->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 11) saw_live = true;
+    }
+    expect(saw_live == true);
+    live_sub->unsubscribe();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(sockets.client->socket_mux().has_socket(raw.socket_id) == true);
+    raw.handle->dispose();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(sockets.client->socket_mux().has_socket(raw.socket_id) == false);
   };
 }

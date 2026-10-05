@@ -5,6 +5,8 @@
 #include "observable/stream_receiver.hpp"
 #include "serialization/promise.hpp"
 
+#include "examples/structures/stream_protocol.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -17,8 +19,8 @@ namespace waos {
       public:
         GatewayReferenceOps(
           std::function<void()> set,
-          std::function<void(waos::observable::StreamReceiver*)> observe,
-          std::function<void(waos::observable::StreamReceiver*)> fetch,
+          std::function<void(waos::observable::StreamReceiver*, std::uint64_t)> observe,
+          std::function<void(waos::observable::StreamReceiver*, waos::stream_flags, std::uint64_t)> fetch,
           std::function<void()> unobserve,
           std::function<void()> dispose
         )
@@ -36,12 +38,16 @@ namespace waos {
           set_();
         }
 
-        void observe(waos::observable::StreamReceiver* receiver) override {
-          if(observe_) observe_(receiver);
+        void observe(waos::observable::StreamReceiver* receiver, std::uint64_t since) override {
+          if(observe_) observe_(receiver, since);
         }
 
-        void fetch(waos::observable::StreamReceiver* receiver) override {
-          if(fetch_) fetch_(receiver);
+        void fetch(
+          waos::observable::StreamReceiver* receiver,
+          waos::stream_flags flags,
+          std::uint64_t since
+        ) override {
+          if(fetch_) fetch_(receiver, flags, since);
         }
 
         void unobserve() override {
@@ -55,8 +61,8 @@ namespace waos {
 
       private:
         std::function<void()> set_;
-        std::function<void(waos::observable::StreamReceiver*)> observe_;
-        std::function<void(waos::observable::StreamReceiver*)> fetch_;
+        std::function<void(waos::observable::StreamReceiver*, std::uint64_t)> observe_;
+        std::function<void(waos::observable::StreamReceiver*, waos::stream_flags, std::uint64_t)> fetch_;
         std::function<void()> unobserve_;
         std::function<void()> dispose_;
         bool sent_ = false;

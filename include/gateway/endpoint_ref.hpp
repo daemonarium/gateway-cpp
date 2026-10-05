@@ -24,7 +24,8 @@ namespace waos {
         std::uint64_t /*stream_id*/,
         std::uint64_t /*function_id*/,
         const std::vector<literal_expr>& /*literals*/,
-        stream_flags /*flags*/ = stream_flags::none
+        stream_flags /*flags*/ = stream_flags::none,
+        std::uint64_t /*since_timestamp*/ = 0
       ) {
         throw std::runtime_error(error_unknown_api);
       }

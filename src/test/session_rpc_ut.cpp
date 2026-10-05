@@ -494,7 +494,7 @@ int main() {
         }
       }
     }
-    expect(method_names.size() >= 11_ul);
+    expect(method_names.size() >= 12_ul);
     expect(method_names[0].find("hello") != std::string::npos);
     expect(method_names[1].find("list_apis") != std::string::npos);
     expect(method_names[2].find("get_rpc_description") != std::string::npos);
@@ -502,18 +502,38 @@ int main() {
     expect(method_names[8].find("fetch_reference") != std::string::npos);
     expect(method_names[9].find("open_pipe") != std::string::npos);
     expect(method_names[10].find("close_pipe") != std::string::npos);
+    expect(method_names[11].find("close_stream") != std::string::npos);
     bool saw_open = false;
+    bool saw_observe = false;
+    bool saw_fetch = false;
     for(const auto& type : reg.get_types()) {
-      if(type->getName() != "mux_socket_open") continue;
-      saw_open = true;
-      expect(type->getMember("socket_id") != nullptr);
-      expect(type->getMember("kind") != nullptr);
-      expect(type->getMember("ref_id") != nullptr);
-      expect(type->getMember("cookie") != nullptr);
-      expect(type->getMember("socket_id")->getName() == "uint32");
-      expect(type->getMember("kind")->getName() == "uint8");
+      if(type->getName() == "mux_socket_open") {
+        saw_open = true;
+        expect(type->getMember("socket_id") != nullptr);
+        expect(type->getMember("kind") != nullptr);
+        expect(type->getMember("ref_id") != nullptr);
+        expect(type->getMember("cookie") != nullptr);
+        expect(type->getMember("socket_id")->getName() == "uint32");
+        expect(type->getMember("kind")->getName() == "uint8");
+      }
+      if(type->getName() == "session_api.observe_reference") {
+        saw_observe = true;
+        expect(type->getMember("ref_id") != nullptr);
+        expect(type->getMember("since_timestamp") != nullptr);
+        expect(type->getMember("ref_id")->getName() == "uint32");
+        expect(type->getMember("since_timestamp")->getName() == "uint64");
+      }
+      if(type->getName() == "session_api.fetch_reference") {
+        saw_fetch = true;
+        expect(type->getMember("ref_id") != nullptr);
+        expect(type->getMember("flags") != nullptr);
+        expect(type->getMember("since_timestamp") != nullptr);
+        expect(type->getMember("flags")->getName() == "uint8");
+      }
     }
     expect(saw_open);
+    expect(saw_observe);
+    expect(saw_fetch);
   };
 
   "dump golden hello and api_message hex"_test = [] {

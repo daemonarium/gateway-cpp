@@ -1,5 +1,6 @@
 #pragma once
 
+#include "examples/structures/stream_protocol.hpp"
 #include "gateway/api_connection.hpp"
 #include "gateway/expr.hpp"
 #include "gateway/generated/session_rpc_client.hpp"
@@ -16,6 +17,8 @@
 #include "serialization/socket_rpc_client.hpp"
 
 #include <deque>
+#include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -144,10 +147,11 @@ namespace waos {
 
         std::shared_ptr<serialization::promise<std::uint32_t>> observe_reference(
           std::uint32_t ref_id,
-          waos::observable::StreamReceiver* receiver = nullptr
+          waos::observable::StreamReceiver* receiver = nullptr,
+          std::uint64_t since = 0
         ) {
           if(receiver) pending_observe_[ref_id] = receiver;
-          return api_.observe_reference(ref_id);
+          return api_.observe_reference(ref_id, since);
         }
 
         std::shared_ptr<serialization::promise<void>> unobserve_reference(std::uint32_t ref_id) {
@@ -157,10 +161,33 @@ namespace waos {
 
         std::shared_ptr<serialization::promise<std::uint32_t>> fetch_reference(
           std::uint32_t ref_id,
-          waos::observable::StreamReceiver* receiver = nullptr
+          waos::observable::StreamReceiver* receiver = nullptr,
+          waos::stream_flags flags = waos::stream_flags::none,
+          std::uint64_t since = 0
         ) {
           if(receiver) pending_fetch_[ref_id].push_back(receiver);
-          return api_.fetch_reference(ref_id);
+          return api_.fetch_reference(ref_id, static_cast<std::uint8_t>(flags), since);
+        }
+
+        std::shared_ptr<serialization::promise<opened_stream>> open_stream(
+          std::uint32_t ref_id,
+          waos::observable::StreamReceiver* receiver,
+          waos::stream_flags flags = waos::stream_flags::none,
+          std::uint64_t since = 0
+        ) {
+          auto out = std::make_shared<serialization::promise<opened_stream>>();
+          auto rpc = fetch_reference(ref_id, receiver, flags, since);
+          rpc->on_resolved([this, out, flags](std::uint32_t id) {
+            opened_stream result;
+            result.socket_id = id;
+            const bool close = flags == waos::stream_flags::observe;
+            result.handle = std::make_shared<StreamDispose>([this, id, close]() {
+              if(close) close_stream(id);
+            });
+            out->resolve(std::move(result));
+          });
+          rpc->on_rejected([out](std::exception_ptr ep) { out->reject(ep); });
+          return out;
         }
 
         std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint32_t ref_id) {
@@ -178,6 +205,12 @@ namespace waos {
           if(socket_mux_) socket_mux_->close_socket(socket_id);
           on_mux_close(socket_id);
           return api_.close_pipe(socket_id);
+        }
+
+        std::shared_ptr<serialization::promise<void>> close_stream(std::uint32_t socket_id) {
+          if(socket_mux_) socket_mux_->close_socket(socket_id);
+          on_mux_close(socket_id);
+          return api_.close_stream(socket_id);
         }
 
         void send_pipe(std::uint32_t socket_id, binary payload) {
@@ -245,6 +278,20 @@ namespace waos {
         }
 
       private:
+        class StreamDispose : public waos::observable::Disposable {
+          public:
+            explicit StreamDispose(std::function<void()> close) : close_(std::move(close)) {}
+            ~StreamDispose() override { dispose(); }
+            void dispose() override {
+              if(done_) return;
+              done_ = true;
+              if(close_) close_();
+            }
+          private:
+            std::function<void()> close_;
+            bool done_ = false;
+        };
+
         struct SocketEntry {
           std::uint8_t kind = 0;
           std::uint32_t ref_id = 0;
@@ -352,11 +399,15 @@ namespace waos {
           }
           auto ops = std::make_shared<GatewayReferenceOps>(
             [this, ref_id, value]() { api_.set_reference(ref_id, value); },
-            [this, ref_id](waos::observable::StreamReceiver* receiver) {
-              observe_reference(ref_id, receiver);
+            [this, ref_id](waos::observable::StreamReceiver* receiver, std::uint64_t since) {
+              observe_reference(ref_id, receiver, since);
             },
-            [this, ref_id](waos::observable::StreamReceiver* receiver) {
-              fetch_reference(ref_id, receiver);
+            [this, ref_id](
+              waos::observable::StreamReceiver* receiver,
+              waos::stream_flags flags,
+              std::uint64_t since
+            ) {
+              fetch_reference(ref_id, receiver, flags, since);
             },
             [this, ref_id]() { unobserve_reference(ref_id); },
             [this, ref_id]() { api_.dispose_reference(ref_id); }
@@ -366,7 +417,14 @@ namespace waos {
             path{call.api_id, call.function_id, std::move(args)},
             std::move(ops),
             [this](std::uint32_t socket, bool paused) { set_mux_paused(socket, paused); },
-            [this](std::uint32_t socket) { detach_mux_receiver(socket); }
+            [this](std::uint32_t socket) { detach_mux_receiver(socket); },
+            [this, ref_id](
+              waos::observable::StreamReceiver* receiver,
+              waos::stream_flags flags,
+              std::uint64_t since
+            ) {
+              return open_stream(ref_id, receiver, flags, since);
+            }
           );
           refs_[ref_id] = ref;
           return ref;

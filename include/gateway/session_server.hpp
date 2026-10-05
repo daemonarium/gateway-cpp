@@ -62,12 +62,15 @@ namespace waos {
           }
           sess_.set_observation_hooks(
             [this](std::uint32_t ref_id, const expr& value) { on_set_reference(ref_id, value); },
-            [this](std::uint32_t ref_id) { return on_observe_reference(ref_id); },
+            [this](std::uint32_t ref_id, std::uint64_t since) { return on_observe_reference(ref_id, since); },
             [this](std::uint32_t ref_id) { on_unobserve_reference(ref_id); },
             [this](std::uint32_t ref_id) { on_dispose_reference(ref_id); },
-            [this](std::uint32_t ref_id) { return on_fetch_reference(ref_id); },
+            [this](std::uint32_t ref_id, std::uint8_t flags, std::uint64_t since) {
+              return on_fetch_reference(ref_id, flags, since);
+            },
             [this](std::uint32_t cookie) { return open_pipe(cookie); },
-            [this](std::uint32_t socket_id) { close_pipe(socket_id); }
+            [this](std::uint32_t socket_id) { close_pipe(socket_id); },
+            [this](std::uint32_t socket_id) { close_stream(socket_id); }
           );
           attach_session(rpc_, sess_);
           rpc_.template on_message<api_message>(
@@ -124,6 +127,15 @@ namespace waos {
           forget_socket(socket_id);
         }
 
+        void close_stream(std::uint32_t socket_id) {
+          auto ref_it = socket_to_ref_.find(socket_id);
+          if(ref_it == socket_to_ref_.end()) return;
+          auto slot_it = refs_.find(ref_it->second);
+          if(slot_it == refs_.end()) return;
+          if(slot_it->second.fetch_sockets.erase(socket_id) == 0) return;
+          close_stream_socket(socket_id, true);
+        }
+
         void send_pipe(std::uint32_t socket_id, binary payload) {
           if(socket_mux_) socket_mux_->send_data(socket_id, std::move(payload));
         }
@@ -138,7 +150,7 @@ namespace waos {
           std::uint64_t function_id = 0;
           std::vector<literal_expr> literals;
           std::uint32_t observe_socket = 0;
-          std::set<std::uint32_t> fetch_sockets;
+          std::map<std::uint32_t, std::uint8_t> fetch_sockets;
         };
 
         std::shared_ptr<session_state> state_;
@@ -233,7 +245,7 @@ namespace waos {
           refs_[ref_id] = std::move(slot);
         }
 
-        std::uint32_t on_observe_reference(std::uint32_t ref_id) {
+        std::uint32_t on_observe_reference(std::uint32_t ref_id, std::uint64_t since) {
           auto it = refs_.find(ref_id);
           if(it == refs_.end()) {
             return 0;
@@ -245,20 +257,24 @@ namespace waos {
           it->second.observe_socket = socket;
           socket_to_ref_[socket] = ref_id;
           if(socket_mux_) socket_mux_->open_socket(socket, mux_kind_observe, ref_id, 0);
-          start_ref_stream(ref_id, it->second, socket, stream_flags::observe);
+          start_ref_stream(ref_id, it->second, socket, stream_flags::observe, since);
           return socket;
         }
 
-        std::uint32_t on_fetch_reference(std::uint32_t ref_id) {
+        std::uint32_t on_fetch_reference(
+          std::uint32_t ref_id,
+          std::uint8_t flags,
+          std::uint64_t since
+        ) {
           auto it = refs_.find(ref_id);
           if(it == refs_.end()) {
             return 0;
           }
           const std::uint32_t socket = alloc_socket();
-          it->second.fetch_sockets.insert(socket);
+          it->second.fetch_sockets[socket] = flags;
           socket_to_ref_[socket] = ref_id;
           if(socket_mux_) socket_mux_->open_socket(socket, mux_kind_fetch, ref_id, 0);
-          start_ref_stream(ref_id, it->second, socket, stream_flags::none);
+          start_ref_stream(ref_id, it->second, socket, static_cast<stream_flags>(flags), since);
           return socket;
         }
 
@@ -279,7 +295,8 @@ namespace waos {
           std::uint32_t ref_id,
           ref_slot& slot,
           std::uint32_t socket_id,
-          stream_flags flags
+          stream_flags flags,
+          std::uint64_t since
         ) {
           auto it = endpoints_.find(slot.api_id);
           if(it == endpoints_.end() || !it->second) {
@@ -289,7 +306,7 @@ namespace waos {
           stream_to_socket_[inner] = socket_id;
           socket_to_stream_[socket_id] = inner;
           (void)ref_id;
-          it->second->start_stream(inner, slot.function_id, slot.literals, flags);
+          it->second->start_stream(inner, slot.function_id, slot.literals, flags, since);
         }
 
         void send_stream_frame(std::uint32_t socket_id, binary frame, bool complete_fetch) {
@@ -307,11 +324,15 @@ namespace waos {
           if(ref_it == socket_to_ref_.end()) return;
           auto slot_it = refs_.find(ref_it->second);
           if(slot_it == refs_.end()) return;
-          if(slot_it->second.fetch_sockets.find(socket_id) == slot_it->second.fetch_sockets.end()) {
+          auto fs = slot_it->second.fetch_sockets.find(socket_id);
+          if(fs == slot_it->second.fetch_sockets.end()) {
+            return;
+          }
+          if(fs->second != static_cast<std::uint8_t>(stream_flags::none)) {
             return;
           }
           close_stream_socket(socket_id, false);
-          slot_it->second.fetch_sockets.erase(socket_id);
+          slot_it->second.fetch_sockets.erase(fs);
         }
 
         void close_stream_socket(std::uint32_t socket_id, bool cancel_inner) {
@@ -347,7 +368,8 @@ namespace waos {
           ref_slot slot = std::move(it->second);
           refs_.erase(it);
           close_stream_socket(slot.observe_socket, true);
-          for(std::uint32_t socket : slot.fetch_sockets) {
+          for(auto& [socket, flags] : slot.fetch_sockets) {
+            (void)flags;
             close_stream_socket(socket, true);
           }
         }

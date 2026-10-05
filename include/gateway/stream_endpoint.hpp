@@ -73,9 +73,10 @@ namespace waos {
           std::uint64_t stream_id,
           std::uint64_t function_id,
           const std::vector<literal_expr>& literals,
-          stream_flags flags = stream_flags::none
+          stream_flags flags = stream_flags::none,
+          std::uint64_t since_timestamp = 0
         ) override {
-          feed(encode_call(function_id, stream_id, literals, flags), true);
+          feed(encode_call(function_id, stream_id, literals, flags, since_timestamp), true);
         }
 
         void cancel_stream(std::uint64_t stream_id) override {
@@ -103,6 +104,8 @@ namespace waos {
           }
           return blocked;
         }
+
+        const stream_handle& last_handle() const { return last_handle_; }
 
         void pump() {
           pump_frames(false);
@@ -184,9 +187,11 @@ namespace waos {
         server_type server_;
         std::map<std::uint64_t, producer> producers_;
         producer* last_ = nullptr;
+        stream_handle last_handle_{};
         std::function<void(binary)> handler_;
 
         producer& open_producer(const stream_handle& handle) {
+          last_handle_ = handle;
           auto& slot = producers_[handle.stream_id];
           slot.obs = std::make_shared<waos::observable::Observable<waos::observable::BinaryEntry>>();
           slot.relay = std::make_shared<waos::observable::StreamRelayConsumer<channel_type>>(
@@ -221,7 +226,8 @@ namespace waos {
           std::uint64_t function_id,
           std::uint64_t stream_id,
           const std::vector<literal_expr>& literals,
-          stream_flags flags
+          stream_flags flags,
+          std::uint64_t since_timestamp
         ) {
           struct circular_buffer in {};
           struct circular_buffer out {};
@@ -235,7 +241,7 @@ namespace waos {
           handle.pid = 0;
           handle.socket = 0;
           handle.stream_id = stream_id;
-          handle.since_timestamp = 0;
+          handle.since_timestamp = since_timestamp;
           handle.flags = static_cast<std::uint8_t>(flags);
           const std::uint64_t key = literals.empty() ? 0 : u64_from_le(literals[0].value);
           const std::uint64_t count = literals.size() < 2 ? 1 : u64_from_le(literals[1].value);

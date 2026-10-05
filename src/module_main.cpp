@@ -88,5 +88,9 @@ extern "C" void start() {
     if(gateway_server) {
       gateway_server->handle_data();
     }
+  }, []() {
+    if(gateway_server) {
+      gateway_server->handle_drain();
+    }
   });
 }

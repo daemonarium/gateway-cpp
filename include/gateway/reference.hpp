@@ -47,17 +47,19 @@ namespace waos {
           std::uint64_t ref_id,
           path key,
           std::function<void(waos::observable::StreamReceiver*)> attach,
-          std::shared_ptr<waos::observable::ReferenceOps> ops
+          std::shared_ptr<waos::observable::ReferenceOps> ops,
+          std::function<void(bool)> set_paused = {},
+          std::function<void()> detach = {}
         )
           : waos::observable::RemoteReference<entry_type>(
               ops,
-              [ops, attach]() -> std::shared_ptr<observable_type> {
+              [ops, attach, set_paused, detach]() -> std::shared_ptr<observable_type> {
                 return std::make_shared<GatewayObservable>(
-                  ops, attach, gateway_observe_mode::observe);
+                  ops, attach, gateway_observe_mode::observe, set_paused, detach);
               },
-              [ops, attach]() -> std::shared_ptr<observable_type> {
+              [ops, attach, set_paused, detach]() -> std::shared_ptr<observable_type> {
                 return std::make_shared<GatewayObservable>(
-                  ops, attach, gateway_observe_mode::fetch);
+                  ops, attach, gateway_observe_mode::fetch, set_paused, detach);
               }
             ),
             ref_id_(ref_id),

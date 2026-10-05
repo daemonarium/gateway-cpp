@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gateway/session.hpp"
+#include "observable/socket_mux.hpp"
 
 #include "serialization/rpc.hpp"
 
@@ -26,6 +27,7 @@ namespace waos {
     void register_session_channel(Rpc& rpc) {
       rpc.register_basic_types();
       rpc.template register_message_type<api_message>();
+      waos::observable::register_mux_socket_messages(rpc);
       rpc.channel().template register_exception_type<std::runtime_error>();
       register_session_pointer_types(rpc);
     }

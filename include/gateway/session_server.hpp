@@ -8,6 +8,7 @@
 #include "gateway/session_rpc.hpp"
 
 #include "examples/structures/stream_protocol.hpp"
+#include "observable/socket_mux.hpp"
 #include "serialization/socket_rpc_server.hpp"
 
 #include <map>
@@ -41,6 +42,7 @@ namespace waos {
     class session_server {
       public:
         using rpc_type = serialization::socket_rpc_server<Codec, Transport>;
+        using mux_type = waos::observable::SocketMux<typename rpc_type::channel_type>;
 
         session_server(
           Transport transport,
@@ -69,6 +71,7 @@ namespace waos {
               on_api_message(msg, payload_size);
             })
           );
+          socket_mux_.emplace(rpc_.channel());
           bind_endpoint_handlers();
         }
 
@@ -85,7 +88,14 @@ namespace waos {
           rpc_.handle_data();
         }
 
+        void handle_drain() {
+          if(socket_mux_) {
+            socket_mux_->on_writable();
+          }
+        }
+
         rpc_type& rpc() { return rpc_; }
+        mux_type& socket_mux() { return *socket_mux_; }
         session_api& sess() { return sess_; }
         session_state& state() { return *state_; }
 
@@ -107,6 +117,7 @@ namespace waos {
         std::map<std::uint64_t, std::uint64_t> stream_to_ref_;
         std::uint64_t next_stream_id_ = 1;
         rpc_type rpc_;
+        std::optional<mux_type> socket_mux_;
 
         void bind_endpoint_handlers() {
           for(auto& [id, ep] : endpoints_) {
@@ -133,11 +144,7 @@ namespace waos {
                 return;
               }
               binary rewritten = rewrite_inner_stream_id(std::move(payload), ref_it->second);
-              if(!slot_it->second.observed) {
-                slot_it->second.pending.push_back(rewritten);
-              } else {
-                send_api_message(api_id, rewritten);
-              }
+              send_stream_frame(ref_it->second, slot_it->second, std::move(rewritten));
               if(slot_it->second.scan
                   && (*type_index == inner_stream_done || *type_index == inner_stream_error)) {
                 complete_scan(slot_it->second);
@@ -196,10 +203,11 @@ namespace waos {
           if(it == refs_.end()) {
             return;
           }
-          start_ref_stream(ref_id, it->second, stream_flags::observe);
+          if(socket_mux_) socket_mux_->open_socket(ref_id);
           it->second.scan = false;
           it->second.observed = true;
-          flush_pending(it->second);
+          start_ref_stream(ref_id, it->second, stream_flags::observe);
+          flush_pending(ref_id, it->second);
         }
 
         void on_fetch_reference(std::uint64_t ref_id) {
@@ -207,9 +215,10 @@ namespace waos {
           if(it == refs_.end()) {
             return;
           }
-          start_ref_stream(ref_id, it->second, stream_flags::none);
+          if(socket_mux_) socket_mux_->open_socket(ref_id);
           it->second.observed = true;
-          flush_pending(it->second);
+          start_ref_stream(ref_id, it->second, stream_flags::none);
+          flush_pending(ref_id, it->second);
         }
 
         void on_unobserve_reference(std::uint64_t ref_id) {
@@ -218,6 +227,7 @@ namespace waos {
             return;
           }
           it->second.observed = false;
+          if(socket_mux_) socket_mux_->close_socket(ref_id);
         }
 
         void on_dispose_reference(std::uint64_t ref_id) {
@@ -238,12 +248,20 @@ namespace waos {
           it->second->start_stream(slot.stream_id, slot.function_id, slot.literals, flags);
         }
 
-        void flush_pending(ref_slot& slot) {
+        void flush_pending(std::uint64_t ref_id, ref_slot& slot) {
           std::vector<binary> queued = std::move(slot.pending);
           slot.pending.clear();
-          for(const binary& frame : queued) {
-            send_api_message(slot.api_id, frame);
+          for(binary& frame : queued) {
+            send_stream_frame(ref_id, slot, std::move(frame));
           }
+        }
+
+        void send_stream_frame(std::uint64_t ref_id, ref_slot& slot, binary frame) {
+          if(!socket_mux_ || !socket_mux_->has_socket(ref_id) || !slot.observed) {
+            slot.pending.push_back(std::move(frame));
+            return;
+          }
+          socket_mux_->send_data(ref_id, std::move(frame));
         }
 
         void complete_scan(ref_slot& slot) {
@@ -262,6 +280,7 @@ namespace waos {
           }
           ref_slot slot = std::move(it->second);
           refs_.erase(it);
+          if(socket_mux_) socket_mux_->close_socket(ref_id);
           if(slot.stream_id != 0) {
             stream_to_ref_.erase(slot.stream_id);
             auto ep = endpoints_.find(slot.api_id);

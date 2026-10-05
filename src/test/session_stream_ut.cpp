@@ -292,4 +292,64 @@ int main() {
     expect(b->sum().getEntries()[0].value[0] == static_cast<std::uint8_t>(0xab));
     expect(u64_from_le(c->sum().getEntries()[0].key) == 3_ul);
   };
+
+  "slow consumer on ref A does not block ref B or session RPC"_test = [] {
+    pair sockets;
+    auto a = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(1)}));
+    auto b = sockets.client->set_reference(8, make_call(2, 0, {make_literal_u64(2)}));
+    struct SlowSink {
+      std::shared_ptr<serialization::promise<void>> stall =
+        std::make_shared<serialization::promise<void>>();
+      std::uint64_t sinceTimestamp() const { return 0; }
+      std::shared_ptr<serialization::promise<void>> onChange(Change) { return stall; }
+      void onReady() {}
+      void onReset() {}
+      void onError(std::exception_ptr) {}
+      void onClosed() {}
+    };
+    auto slow = std::make_shared<SlowSink>();
+    a->observable().subscribe(slow, 1);
+    auto sb = start_live(*b);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(b->sum().state() == ObservableState::ready);
+    BinaryEntry fat;
+    fat.key = u64_to_le(11);
+    fat.value = binary(64, 1);
+    fat.ts = 11;
+    sockets.ep->push(fat);
+    fat.key = u64_to_le(12);
+    fat.ts = 12;
+    sockets.ep->push(fat);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    BinaryEntry live;
+    live.key = u64_to_le(9);
+    live.value = u64_to_le(9);
+    live.ts = 9;
+    sockets.ep2->push(live);
+    sockets.ep2->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw_b = false;
+    for(const auto& entry : b->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 9) saw_b = true;
+    }
+    expect(saw_b == true);
+    std::vector<api_info> infos;
+    sockets.client->list_apis()->on_resolved([&](std::vector<api_info>& v) { infos = v; });
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(infos.size() == 2_ul);
+    slow->stall->resolve();
+    BinaryEntry resume;
+    resume.key = u64_to_le(13);
+    resume.value = u64_to_le(13);
+    resume.ts = 13;
+    sockets.ep->push(resume);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw_a = false;
+    for(const auto& entry : a->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 13) saw_a = true;
+    }
+    expect(saw_a == true);
+  };
 }

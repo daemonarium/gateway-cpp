@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gateway/session.hpp"
+#include "observable/socket_mux.hpp"
 
 #include "serialization/type_description.hpp"
 #include "serialization/type_registry.hpp"
@@ -115,6 +116,10 @@ namespace waos {
       serialization::type_description::create(api_message{}, registry);
       serialization::type_description::create(session_api{}, registry);
       describe_expr_nodes(registry);
+      serialization::type_description::create(waos::mux_socket_open{}, registry);
+      serialization::type_description::create(waos::mux_socket_data{}, registry);
+      serialization::type_description::create(waos::mux_socket_close{}, registry);
+      serialization::type_description::create(waos::mux_socket_window{}, registry);
       const std::string bytes = serialization::serialize_type_registry_blob(registry);
       return binary(bytes.begin(), bytes.end());
     }

@@ -28,11 +28,15 @@ namespace waos {
         GatewayObservable(
           std::shared_ptr<waos::observable::ReferenceOps> ops,
           std::function<void(waos::observable::StreamReceiver*)> attach,
-          gateway_observe_mode mode
+          gateway_observe_mode mode,
+          std::function<void(bool)> set_paused = {},
+          std::function<void()> detach = {}
         )
           : ops_(std::move(ops)),
             attach_(std::move(attach)),
-            mode_(mode) {}
+            mode_(mode),
+            set_paused_(std::move(set_paused)),
+            detach_(std::move(detach)) {}
 
         std::optional<std::uint64_t> last_wire_stream_id() const {
           return last_wire_stream_id_;
@@ -72,19 +76,27 @@ namespace waos {
 
         void onStop() override {
           if(ops_ && mode_ == gateway_observe_mode::observe) ops_->unobserve();
-          if(attached_ && attach_) {
-            attach_(nullptr);
+          if(attached_) {
+            if(detach_) detach_();
+            else if(attach_) attach_(nullptr);
             attached_ = false;
           }
         }
 
-        void onPause() override {}
-        void onResume() override {}
+        void onPause() override {
+          if(set_paused_) set_paused_(true);
+        }
+
+        void onResume() override {
+          if(set_paused_) set_paused_(false);
+        }
 
       private:
         std::shared_ptr<waos::observable::ReferenceOps> ops_;
         std::function<void(waos::observable::StreamReceiver*)> attach_;
         gateway_observe_mode mode_ = gateway_observe_mode::observe;
+        std::function<void(bool)> set_paused_;
+        std::function<void()> detach_;
         bool attached_ = false;
         std::optional<std::uint64_t> last_wire_stream_id_;
     };

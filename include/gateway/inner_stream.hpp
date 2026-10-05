@@ -18,6 +18,7 @@ namespace waos {
     // Register after register_basic_types so indexes match the TS inner channel.
     // stream_key is registered so later indexes stay aligned. Do not register
     // stream_observe_begin / stream_retransmit.
+    // Session-channel mux_socket_* types live in observable/socket_mux.hpp.
     template <typename Channel>
     void register_inner_stream_messages(Channel& channel) {
       channel.template register_message_type<socket_opened>();

@@ -65,48 +65,38 @@ namespace {
     }
   };
 
-  struct reset_watcher {
-    bool* saw = nullptr;
+  struct Sink {
+    bool* saw_reset = nullptr;
     std::uint64_t sinceTimestamp() const { return 0; }
     std::shared_ptr<serialization::promise<void>> onChange(Change) {
       return serialization::promise<void>::resolved();
     }
     void onReady() {}
-    void onReset() { if(saw) *saw = true; }
+    void onReset() { if(saw_reset) *saw_reset = true; }
     void onError(std::exception_ptr) {}
     void onClosed() {}
   };
 
-  struct close_watcher {
-    bool* saw = nullptr;
-    std::uint64_t sinceTimestamp() const { return 0; }
-    std::shared_ptr<serialization::promise<void>> onChange(Change) {
-      return serialization::promise<void>::resolved();
-    }
-    void onReady() {}
-    void onReset() {}
-    void onError(std::exception_ptr) {}
-    void onClosed() { if(saw) *saw = true; }
-  };
+  std::shared_ptr<Sink> start_live(reference& ref) {
+    auto sink = std::make_shared<Sink>();
+    ref.observable().subscribe(sink);
+    return sink;
+  }
 
 }
 
 int main() {
   "set_reference observe fills the observable with ref_id"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {}))->on_resolved([&](std::shared_ptr<reference>& r) {
-      ref = r;
-    });
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {}));
+    auto sink = start_live(*ref);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(ref != nullptr);
-    ref->observe();
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    auto entries = ref->sum().getEntries();
+    auto& obs = ref->sum();
+    auto entries = obs.getEntries();
     expect(entries.size() == 1_ul);
     expect(u64_from_le(entries[0].key) == 0_ul);
     expect(u64_from_le(entries[0].value) == 1_ul);
-    expect(ref->sum().state() == ObservableState::ready);
+    expect(obs.state() == ObservableState::ready);
     expect(ref->last_wire_stream_id().has_value());
     expect(*ref->last_wire_stream_id() == 7_ul);
     expect(ref->observables().size() == 1_ul);
@@ -114,29 +104,23 @@ int main() {
 
   "literal uint64 becomes the entry key"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(7)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    ref->observe();
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(7)}));
+    auto sink = start_live(*ref);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(u64_from_le(ref->sum().getEntries()[0].key) == 7_ul);
   };
 
   "fetch resolves entries then ends the scan stream"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto sink = std::make_shared<Sink>();
+    auto obs = ref->stream();
+    obs->subscribe(sink);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    auto& obs = ref->fetch();
+    expect(obs->state() == ObservableState::ready);
+    expect(u64_from_le(obs->getEntries()[0].key) == 3_ul);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(obs.state() == ObservableState::ready);
-    expect(u64_from_le(obs.getEntries()[0].key) == 3_ul);
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    const std::size_t before = obs.getEntries().size();
+    const std::size_t before = obs->getEntries().size();
     waos::observable::BinaryEntry extra;
     extra.key = u64_to_le(3);
     extra.value = u64_to_le(9);
@@ -144,34 +128,28 @@ int main() {
     sockets.ep->push(extra);
     sockets.ep->pump();
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(obs.getEntries().size() == before);
+    expect(obs->getEntries().size() == before);
   };
 
-  "set_reference does not start a stream until observe"_test = [] {
+  "set_reference does not start a stream until subscribe"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {}));
     expect(ref->sum().getEntries().size() == 0_ul);
     expect(!ref->last_wire_stream_id().has_value());
-    ref->observe();
+    auto sink = start_live(*ref);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(ref->sum().getEntries().size() == 1_ul);
   };
 
   "observe after fetch starts a new observe stream"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto scan_sink = std::make_shared<Sink>();
+    auto fetched = ref->stream();
+    fetched->subscribe(scan_sink);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    auto& obs = ref->fetch();
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(obs.state() == ObservableState::ready);
-    const std::size_t before = obs.getEntries().size();
+    expect(fetched->state() == ObservableState::ready);
+    const std::size_t before = fetched->getEntries().size();
     waos::observable::BinaryEntry extra;
     extra.key = u64_to_le(3);
     extra.value = u64_to_le(9);
@@ -179,8 +157,8 @@ int main() {
     sockets.ep->push(extra);
     sockets.ep->pump();
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(obs.getEntries().size() == before);
-    ref->observe();
+    expect(fetched->getEntries().size() == before);
+    auto live_sink = start_live(*ref);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     waos::observable::BinaryEntry live;
     live.key = u64_to_le(3);
@@ -189,65 +167,59 @@ int main() {
     sockets.ep->push(live);
     sockets.ep->pump();
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(u64_from_le(obs.getEntries()[0].value) == 11_ul);
+    expect(u64_from_le(ref->sum().getEntries()[0].value) == 11_ul);
   };
 
-  "dispose cancels and closes the observable"_test = [] {
+  "last unsubscribe drops and closes the observable"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {}));
+    auto sink = std::make_shared<Sink>();
+    auto out = ref->observable().subscribe(sink);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    bool closed = false;
-    auto watcher = std::make_shared<close_watcher>();
-    watcher->saw = &closed;
-    ref->sum().subscribe(watcher);
-    ref->dispose();
+    out->unsubscribe();
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    expect(closed == true);
-    expect(ref->sum().state() == ObservableState::closed);
+    expect(ref->peekLive() == nullptr || ref->peekLive()->state() == ObservableState::closed);
   };
 
   "rejects Ref arguments and non-call expressions"_test = [] {
     pair sockets;
     std::string dependent;
-    sockets.client->set_reference(7, make_call(1, 0, {make_ref(3)}))->on_rejected([&](std::exception_ptr ep) {
-      dependent = catch_rpc_error(ep);
-    });
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    try {
+      sockets.client->set_reference(7, make_call(1, 0, {make_ref(3)}));
+    } catch(...) {
+      dependent = catch_rpc_error(std::current_exception());
+    }
     expect(dependent == std::string(error_dependent_ref_not_supported));
 
     std::string member;
-    sockets.client->set_reference(8, make_member(make_ref(1), 0))->on_rejected([&](std::exception_ptr ep) {
-      member = catch_rpc_error(ep);
-    });
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    try {
+      sockets.client->set_reference(8, make_member(make_ref(1), 0));
+    } catch(...) {
+      member = catch_rpc_error(std::current_exception());
+    }
     expect(member == std::string(error_unknown_expr));
 
     std::string switched;
-    sockets.client->set_reference(9, make_switch(make_ref(1), {}))->on_rejected([&](std::exception_ptr ep) {
-      switched = catch_rpc_error(ep);
-    });
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    try {
+      sockets.client->set_reference(9, make_switch(make_ref(1), {}));
+    } catch(...) {
+      switched = catch_rpc_error(std::current_exception());
+    }
     expect(switched == std::string(error_unknown_expr));
 
     std::string leaf;
-    sockets.client->set_reference(10, make_ref(1))->on_rejected([&](std::exception_ptr ep) {
-      leaf = catch_rpc_error(ep);
-    });
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    try {
+      sockets.client->set_reference(10, make_ref(1));
+    } catch(...) {
+      leaf = catch_rpc_error(std::current_exception());
+    }
     expect(leaf == std::string(error_unknown_expr));
   };
 
   "stream_error and stream_reset reach the observable"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> failed;
-    sockets.client->set_reference(7, make_call(1, 1, {}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { failed = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    failed->observe();
+    auto failed = sockets.client->set_reference(7, make_call(1, 1, {}));
+    auto fail_sink = start_live(*failed);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(failed->sum().state() == ObservableState::error);
     std::string message;
@@ -258,16 +230,11 @@ int main() {
     }
     expect(message.find("stream_failed") != std::string::npos);
 
-    std::shared_ptr<reference> reset;
-    sockets.client->set_reference(8, make_call(1, 2, {}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { reset = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    auto reset = sockets.client->set_reference(8, make_call(1, 2, {}));
     bool saw_reset = false;
-    auto watcher = std::make_shared<reset_watcher>();
-    watcher->saw = &saw_reset;
-    reset->sum().subscribe(watcher);
-    reset->observe();
+    auto watcher = std::make_shared<Sink>();
+    watcher->saw_reset = &saw_reset;
+    reset->observable().subscribe(watcher);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(saw_reset == true);
     expect(reset->sum().state() == ObservableState::ready);
@@ -276,12 +243,8 @@ int main() {
 
   "holds a change until the output buffer drains"_test = [] {
     pair sockets(1024);
-    std::shared_ptr<reference> ref;
-    sockets.client->set_reference(7, make_call(1, 0, {}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { ref = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    ref->observe();
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {}));
+    auto sink = start_live(*ref);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     std::shared_ptr<serialization::promise<void>> blocked;
     for(int i = 0; i < 32 && !blocked; ++i) {
@@ -299,26 +262,30 @@ int main() {
     expect(blocked->state == serialization::promise_state::resolved);
   };
 
+  "hold keeps the reference after last unsubscribe"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {}));
+    auto holder = ref->hold();
+    auto sink = std::make_shared<Sink>();
+    auto out = ref->observable().subscribe(sink);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    out->unsubscribe();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->peekLive() != nullptr);
+    expect(ref->peekLive()->state() == ObservableState::idle);
+    holder->dispose();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->peekLive() == nullptr || ref->peekLive()->state() == ObservableState::closed);
+  };
+
   "demuxes two refs and two api ids"_test = [] {
     pair sockets;
-    std::shared_ptr<reference> a;
-    std::shared_ptr<reference> b;
-    std::shared_ptr<reference> c;
-    sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(1)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { a = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    sockets.client->set_reference(8, make_call(1, 3, {make_literal_u64(2)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { b = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    sockets.client->set_reference(9, make_call(2, 0, {make_literal_u64(3)}))->on_resolved(
-      [&](std::shared_ptr<reference>& r) { c = r; }
-    );
-    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
-    a->observe();
-    b->observe();
-    c->observe();
+    auto a = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(1)}));
+    auto b = sockets.client->set_reference(8, make_call(1, 3, {make_literal_u64(2)}));
+    auto c = sockets.client->set_reference(9, make_call(2, 0, {make_literal_u64(3)}));
+    auto sa = start_live(*a);
+    auto sb = start_live(*b);
+    auto sc = start_live(*c);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(u64_from_le(a->sum().getEntries()[0].key) == 1_ul);
     expect(b->sum().getEntries()[0].value.size() == 1_ul);

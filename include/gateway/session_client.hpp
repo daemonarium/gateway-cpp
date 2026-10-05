@@ -3,6 +3,7 @@
 #include "gateway/api_connection.hpp"
 #include "gateway/expr.hpp"
 #include "gateway/generated/session_rpc_client.hpp"
+#include "gateway/gateway_reference_ops.hpp"
 #include "gateway/reference.hpp"
 #include "gateway/session_rpc.hpp"
 #include "gateway/types.hpp"
@@ -100,34 +101,23 @@ namespace waos {
           return api_.get_session_description();
         }
 
-        std::shared_ptr<serialization::promise<std::shared_ptr<reference>>> set_reference(
+        std::shared_ptr<reference> set_reference(
           std::uint64_t ref_id,
           expr value
         ) {
-          auto out = std::make_shared<serialization::promise<std::shared_ptr<reference>>>();
-          auto pending = api_.set_reference(ref_id, value);
-          pending->on_resolved([this, ref_id, value, out]() {
-            try {
-              direct_call call = validate_direct_expr(value);
-              auto opened = open_api(call.api_id);
-              opened->on_resolved([this, ref_id, call, out](api_connection*& conn) {
-                try {
-                  out->resolve(adopt_reference(ref_id, call, conn));
-                } catch(...) {
-                  out->reject(std::current_exception());
-                }
-              });
-              opened->on_rejected([out](std::exception_ptr ep) {
-                out->reject(ep);
-              });
-            } catch(...) {
-              out->reject(std::current_exception());
-            }
-          });
-          pending->on_rejected([out](std::exception_ptr ep) {
-            out->reject(ep);
-          });
-          return out;
+          direct_call call = validate_direct_expr(value);
+          auto it = connections_.find(call.api_id);
+          if(it == connections_.end()) {
+            throw std::runtime_error("api not open");
+          }
+          return adopt_reference(ref_id, call, value, it->second.get());
+        }
+
+        std::shared_ptr<serialization::promise<void>> send_set_reference(
+          std::uint64_t ref_id,
+          expr value
+        ) {
+          return api_.set_reference(ref_id, value);
         }
 
         std::shared_ptr<serialization::promise<void>> observe_reference(std::uint64_t ref_id) {
@@ -143,13 +133,8 @@ namespace waos {
         }
 
         std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint64_t ref_id) {
-          auto it = refs_.find(ref_id);
-          if(it == refs_.end()) {
-            return api_.dispose_reference(ref_id);
-          }
-          auto ref = it->second;
-          refs_.erase(it);
-          return ref->dispose();
+          refs_.erase(ref_id);
+          return api_.dispose_reference(ref_id);
         }
 
         std::shared_ptr<reference> find_reference(std::uint64_t ref_id) const {
@@ -201,6 +186,7 @@ namespace waos {
         std::shared_ptr<reference> adopt_reference(
           std::uint64_t ref_id,
           const direct_call& call,
+          expr value,
           api_connection* conn
         ) {
           std::vector<binary> args;
@@ -208,19 +194,13 @@ namespace waos {
           for(const literal_expr& lit : call.literals) {
             args.push_back(lit.value);
           }
-          reference_ops ops;
-          ops.observe = [this](std::uint64_t id) {
-            return observe_reference(id);
-          };
-          ops.unobserve = [this](std::uint64_t id) {
-            return unobserve_reference(id);
-          };
-          ops.fetch = [this](std::uint64_t id) {
-            return fetch_reference(id);
-          };
-          ops.dispose = [this](std::uint64_t id) {
-            return api_.dispose_reference(id);
-          };
+          auto ops = std::make_shared<GatewayReferenceOps>(
+            [this, ref_id, value]() { api_.set_reference(ref_id, value); },
+            [this, ref_id]() { return observe_reference(ref_id); },
+            [this, ref_id]() { return fetch_reference(ref_id); },
+            [this, ref_id]() { return unobserve_reference(ref_id); },
+            [this, ref_id]() { return api_.dispose_reference(ref_id); }
+          );
           auto ref = std::make_shared<reference>(
             ref_id,
             path{call.api_id, call.function_id, std::move(args)},

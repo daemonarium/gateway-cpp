@@ -38,6 +38,7 @@ namespace waos {
     struct reference_ops {
       std::function<std::shared_ptr<serialization::promise<void>>(std::uint64_t)> observe;
       std::function<std::shared_ptr<serialization::promise<void>>(std::uint64_t)> unobserve;
+      std::function<std::shared_ptr<serialization::promise<void>>(std::uint64_t)> fetch;
       std::function<std::shared_ptr<serialization::promise<void>>(std::uint64_t)> dispose;
     };
 
@@ -90,15 +91,12 @@ namespace waos {
           return ops_.unobserve(ref_id_);
         }
 
-        // Observe, then unobserve once the snapshot is ready.
+        // Start a scan stream. The producer ends with stream_done.
         observable_type& fetch() {
-          observe();
-          auto self = weak_from_this();
-          obs_.readyPromise()->on_resolved([self]() {
-            if(auto locked = self.lock()) {
-              locked->unobserve();
-            }
-          });
+          attach();
+          if(ops_.fetch) {
+            ops_.fetch(ref_id_);
+          }
           return obs_;
         }
 

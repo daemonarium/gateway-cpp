@@ -72,9 +72,10 @@ namespace waos {
         void start_stream(
           std::uint64_t stream_id,
           std::uint64_t function_id,
-          const std::vector<literal_expr>& literals
+          const std::vector<literal_expr>& literals,
+          stream_flags flags = stream_flags::none
         ) override {
-          feed(encode_call(function_id, stream_id, literals), true);
+          feed(encode_call(function_id, stream_id, literals, flags), true);
         }
 
         void cancel_stream(std::uint64_t stream_id) override {
@@ -209,7 +210,8 @@ namespace waos {
         binary encode_call(
           std::uint64_t function_id,
           std::uint64_t stream_id,
-          const std::vector<literal_expr>& literals
+          const std::vector<literal_expr>& literals,
+          stream_flags flags
         ) {
           struct circular_buffer in {};
           struct circular_buffer out {};
@@ -224,6 +226,7 @@ namespace waos {
           handle.socket = 0;
           handle.stream_id = stream_id;
           handle.since_timestamp = 0;
+          handle.flags = static_cast<std::uint8_t>(flags);
           const std::uint64_t key = literals.empty() ? 0 : u64_from_le(literals[0].value);
           const std::uint64_t count = literals.size() < 2 ? 1 : u64_from_le(literals[1].value);
           if(function_id == 0) {

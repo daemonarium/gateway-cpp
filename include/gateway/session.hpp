@@ -18,11 +18,11 @@ namespace waos {
 
     binary make_session_description_blob();
 
-    class session {
+    class session_state {
       public:
-        session() = default;
+        session_state() = default;
 
-        explicit session(
+        explicit session_state(
           std::vector<api_publication> publications,
           visibility_filter filter = default_visibility,
           std::optional<handshake_data> handshake = std::nullopt
@@ -38,13 +38,6 @@ namespace waos {
           if(handshake) {
             apply_handshake(std::move(*handshake));
           }
-        }
-
-        // Reflection-only. Dispatch uses register_object_method on the connection instance.
-        [[=serialization::policy::ignore]]
-        static session& get_rpc_instance() {
-          static session dummy;
-          return dummy;
         }
 
         server_protocol hello(client_protocol client) {
@@ -115,17 +108,26 @@ namespace waos {
           }
         }
 
+        void fetch_reference(std::uint64_t ref_id) {
+          require_ready();
+          if(on_fetch_reference_) {
+            on_fetch_reference_(ref_id);
+          }
+        }
+
         [[=serialization::policy::ignore]]
         void set_observation_hooks(
           std::function<void(std::uint64_t, const expr&)> on_set,
           std::function<void(std::uint64_t)> on_observe,
           std::function<void(std::uint64_t)> on_unobserve,
-          std::function<void(std::uint64_t)> on_dispose
+          std::function<void(std::uint64_t)> on_dispose,
+          std::function<void(std::uint64_t)> on_fetch
         ) {
           on_set_reference_ = std::move(on_set);
           on_observe_reference_ = std::move(on_observe);
           on_unobserve_reference_ = std::move(on_unobserve);
           on_dispose_reference_ = std::move(on_dispose);
+          on_fetch_reference_ = std::move(on_fetch);
         }
 
         [[=serialization::policy::ignore]]
@@ -171,6 +173,9 @@ namespace waos {
         [[=serialization::policy::ignore]]
         std::function<void(std::uint64_t)> on_dispose_reference_;
 
+        [[=serialization::policy::ignore]]
+        std::function<void(std::uint64_t)> on_fetch_reference_;
+
         void apply_handshake(handshake_data data) {
           if(data.protocol_version != protocol_version_v1) {
             state_ = state::failed;
@@ -204,13 +209,7 @@ namespace waos {
         }
     };
 
-    inline binary make_session_description_blob() {
-      serialization::type_registry registry(true);
-      serialization::type_description::create(api_message{}, registry);
-      serialization::type_description::create(session{}, registry);
-      const std::string bytes = serialization::serialize_type_registry_blob(registry);
-      return binary(bytes.begin(), bytes.end());
-    }
-
   }
 }
+
+#include "gateway/session_api.hpp"

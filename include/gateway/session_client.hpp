@@ -2,6 +2,7 @@
 
 #include "gateway/api_connection.hpp"
 #include "gateway/expr.hpp"
+#include "gateway/generated/session_rpc_client.hpp"
 #include "gateway/reference.hpp"
 #include "gateway/session_rpc.hpp"
 #include "gateway/types.hpp"
@@ -29,13 +30,15 @@ namespace waos {
           Transport transport,
           std::optional<handshake_data> handshake = std::nullopt
         )
-          : rpc_(std::move(transport)), handshake_(std::move(handshake)) {
-          register_session_channel(rpc_);
-          rpc_.template on_message<api_message>(
+          : rpc_(std::make_shared<rpc_type>(std::move(transport))),
+            api_(rpc_),
+            handshake_(std::move(handshake)) {
+          register_session_channel(*rpc_);
+          rpc_->template on_message<api_message>(
             std::function<void(api_message&, size_t)>([this](api_message& msg, size_t payload_size) {
               binary payload(payload_size);
               if(payload_size > 0) {
-                rpc_.channel().reader().read_raw(payload.data(), payload_size);
+                rpc_->channel().reader().read_raw(payload.data(), payload_size);
               }
               auto it = connections_.find(msg.api_id);
               if(it != connections_.end()) {
@@ -53,17 +56,17 @@ namespace waos {
           : session_client(serialization::socket_c_transport(socket_id), std::move(handshake)) {}
 
         void handle_data() {
-          rpc_.handle_data();
+          rpc_->handle_data();
         }
 
-        rpc_type& rpc() { return rpc_; }
+        rpc_type& rpc() { return *rpc_; }
 
         std::shared_ptr<serialization::promise<server_protocol>> hello(client_protocol client) {
-          return rpc_.template call<server_protocol>(0, std::move(client));
+          return api_.hello(std::move(client));
         }
 
         std::shared_ptr<serialization::promise<std::vector<api_info>>> list_apis() {
-          auto p = rpc_.template call<std::vector<api_info>>(1);
+          auto p = api_.list_apis();
           p->on_resolved([this](std::vector<api_info>& infos) {
             hashes_.clear();
             for(const auto& info : infos) {
@@ -81,7 +84,7 @@ namespace waos {
             hit->resolve(cached->second.second);
             return hit;
           }
-          auto p = rpc_.template call<binary>(2, api_id);
+          auto p = api_.get_rpc_description(api_id);
           p->on_resolved([this, api_id](binary& blob) {
             binary hash;
             auto h = hashes_.find(api_id);
@@ -94,7 +97,7 @@ namespace waos {
         }
 
         std::shared_ptr<serialization::promise<binary>> get_session_description() {
-          return rpc_.template call<binary>(3);
+          return api_.get_session_description();
         }
 
         std::shared_ptr<serialization::promise<std::shared_ptr<reference>>> set_reference(
@@ -102,7 +105,7 @@ namespace waos {
           expr value
         ) {
           auto out = std::make_shared<serialization::promise<std::shared_ptr<reference>>>();
-          auto pending = rpc_.template call<void>(fn_set_reference, ref_id, value);
+          auto pending = api_.set_reference(ref_id, value);
           pending->on_resolved([this, ref_id, value, out]() {
             try {
               direct_call call = validate_direct_expr(value);
@@ -128,17 +131,21 @@ namespace waos {
         }
 
         std::shared_ptr<serialization::promise<void>> observe_reference(std::uint64_t ref_id) {
-          return rpc_.template call<void>(fn_observe_reference, ref_id);
+          return api_.observe_reference(ref_id);
         }
 
         std::shared_ptr<serialization::promise<void>> unobserve_reference(std::uint64_t ref_id) {
-          return rpc_.template call<void>(fn_unobserve_reference, ref_id);
+          return api_.unobserve_reference(ref_id);
+        }
+
+        std::shared_ptr<serialization::promise<void>> fetch_reference(std::uint64_t ref_id) {
+          return api_.fetch_reference(ref_id);
         }
 
         std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint64_t ref_id) {
           auto it = refs_.find(ref_id);
           if(it == refs_.end()) {
-            return rpc_.template call<void>(fn_dispose_reference, ref_id);
+            return api_.dispose_reference(ref_id);
           }
           auto ref = it->second;
           refs_.erase(it);
@@ -183,7 +190,8 @@ namespace waos {
         }
 
       private:
-        rpc_type rpc_;
+        std::shared_ptr<rpc_type> rpc_;
+        session_rpc<rpc_type> api_;
         std::optional<handshake_data> handshake_;
         std::map<std::uint32_t, binary> hashes_;
         std::map<std::uint32_t, std::pair<binary, binary>> blobs_;
@@ -207,8 +215,11 @@ namespace waos {
           ops.unobserve = [this](std::uint64_t id) {
             return unobserve_reference(id);
           };
+          ops.fetch = [this](std::uint64_t id) {
+            return fetch_reference(id);
+          };
           ops.dispose = [this](std::uint64_t id) {
-            return rpc_.template call<void>(fn_dispose_reference, id);
+            return api_.dispose_reference(id);
           };
           auto ref = std::make_shared<reference>(
             ref_id,
@@ -224,11 +235,11 @@ namespace waos {
 
         api_connection& make_connection(std::uint32_t api_id) {
           auto conn = std::make_unique<api_connection>(api_id, [this, api_id](binary frame) {
-            auto& writer = rpc_.channel().begin_send(api_message{api_id});
+            auto& writer = rpc_->channel().begin_send(api_message{api_id});
             if(!frame.empty()) {
               writer.write_raw(frame.data(), frame.size());
             }
-            rpc_.channel().commit_send();
+            rpc_->channel().commit_send();
           });
           api_connection* ptr = conn.get();
           connections_[api_id] = std::move(conn);

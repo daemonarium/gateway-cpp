@@ -308,7 +308,7 @@ int main() {
 
   "hello version 1 returns server_protocol 1"_test = [] {
     socket_loopback_pair sockets;
-    session sess(sample_publications());
+    session_api sess(std::make_shared<session_state>(sample_publications()));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -327,7 +327,7 @@ int main() {
 
   "wrong hello version errors and later list_apis also errors"_test = [] {
     socket_loopback_pair sockets;
-    session sess(sample_publications());
+    session_api sess(std::make_shared<session_state>(sample_publications()));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -350,7 +350,7 @@ int main() {
 
   "list_apis before hello is handshake_required"_test = [] {
     socket_loopback_pair sockets;
-    session sess(sample_publications());
+    session_api sess(std::make_shared<session_state>(sample_publications()));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -366,7 +366,7 @@ int main() {
 
   "constructor handshake_data skips hello"_test = [] {
     socket_loopback_pair sockets;
-    session sess(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}});
+    session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}}));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -390,7 +390,7 @@ int main() {
     auto pubs = sample_publications();
     binary hash_alpha = xxh3_64_le(pubs[0].description_blob);
     binary hash_beta = xxh3_64_le(pubs[1].description_blob);
-    session sess(pubs, default_visibility, client_protocol{protocol_version_v1, {}});
+    session_api sess(std::make_shared<session_state>(pubs, default_visibility, client_protocol{protocol_version_v1, {}}));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -430,7 +430,7 @@ int main() {
     socket_loopback_pair sockets;
     auth_map auth;
     auth.emplace("hidden", pack_hidden_ids({2}));
-    session sess(sample_publications(), default_visibility, client_protocol{protocol_version_v1, auth});
+    session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, auth}));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -459,9 +459,9 @@ int main() {
     expect(hidden_err == unknown_err);
   };
 
-  "get_session_description blob has methods 0-3 and api_message"_test = [] {
+  "get_session_description blob has methods 0-3, fetch_reference and api_message"_test = [] {
     socket_loopback_pair sockets;
-    session sess(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}});
+    session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}}));
     flat_socket_rpc_server server(sockets.s0);
     flat_socket_rpc_client client(sockets.s1);
     attach_session(server, sess);
@@ -493,18 +493,19 @@ int main() {
         }
       }
     }
-    expect(method_names.size() >= 4_ul);
+    expect(method_names.size() >= 9_ul);
     expect(method_names[0].find("hello") != std::string::npos);
     expect(method_names[1].find("list_apis") != std::string::npos);
     expect(method_names[2].find("get_rpc_description") != std::string::npos);
     expect(method_names[3].find("get_session_description") != std::string::npos);
+    expect(method_names[8].find("fetch_reference") != std::string::npos);
   };
 
   "dump golden hello and api_message hex"_test = [] {
     binary hello_frame;
     {
       socket_loopback_pair hello_sockets;
-      session sess(sample_publications());
+      session_api sess(std::make_shared<session_state>(sample_publications()));
       flat_socket_rpc_server server(hello_sockets.s0);
       flat_socket_rpc_client client(hello_sockets.s1);
       attach_session(server, sess);

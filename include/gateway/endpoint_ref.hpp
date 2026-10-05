@@ -3,6 +3,8 @@
 #include "gateway/expr.hpp"
 #include "gateway/types.hpp"
 
+#include "examples/structures/stream_protocol.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
@@ -21,7 +23,8 @@ namespace waos {
       virtual void start_stream(
         std::uint64_t /*stream_id*/,
         std::uint64_t /*function_id*/,
-        const std::vector<literal_expr>& /*literals*/
+        const std::vector<literal_expr>& /*literals*/,
+        stream_flags /*flags*/ = stream_flags::none
       ) {
         throw std::runtime_error(error_unknown_api);
       }

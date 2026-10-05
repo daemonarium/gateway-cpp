@@ -105,4 +105,20 @@ if(WASM)
     OUTPUT_NAME gateway-session
     SUFFIX ".wasm"
   )
+
+  set(GATEWAY_SESSION_API_TS ${CMAKE_SOURCE_DIR}/gateway/ts/src/generated/sessionApi.ts)
+  set(GATEWAY_SESSION_RPC_HPP ${CMAKE_SOURCE_DIR}/gateway/cpp/include/gateway/generated/session_rpc_client.hpp)
+  add_custom_command(
+    OUTPUT ${GATEWAY_SESSION_API_TS} ${GATEWAY_SESSION_RPC_HPP}
+    COMMAND ${CMAKE_SOURCE_DIR}/node_modules/.bin/tsx
+      ${CMAKE_SOURCE_DIR}/gateway/ts/scripts/generateSessionApi.ts
+      ${CMAKE_BINARY_DIR}/gateway-session.wasm
+    DEPENDS gateway_session_wasm
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Generate session API clients from gateway-session.wasm"
+    VERBATIM
+  )
+  add_custom_target(gateway_session_codegen
+    DEPENDS ${GATEWAY_SESSION_API_TS} ${GATEWAY_SESSION_RPC_HPP}
+  )
 endif()

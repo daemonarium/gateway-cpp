@@ -7,6 +7,7 @@
 #include "gateway/session.hpp"
 #include "gateway/session_rpc.hpp"
 
+#include "examples/structures/stream_protocol.hpp"
 #include "serialization/socket_rpc_server.hpp"
 
 #include <map>
@@ -47,7 +48,8 @@ namespace waos {
           visibility_filter filter = default_visibility,
           std::optional<handshake_data> handshake = std::nullopt
         )
-          : sess_(catalog_from(pubs), std::move(filter), std::move(handshake)),
+          : state_(std::make_shared<session_state>(catalog_from(pubs), std::move(filter), std::move(handshake))),
+            sess_(state_),
             rpc_(std::move(transport)) {
           for(auto& p : pubs) {
             if(p.endpoint) {
@@ -58,7 +60,8 @@ namespace waos {
             [this](std::uint64_t ref_id, const expr& value) { on_set_reference(ref_id, value); },
             [this](std::uint64_t ref_id) { on_observe_reference(ref_id); },
             [this](std::uint64_t ref_id) { on_unobserve_reference(ref_id); },
-            [this](std::uint64_t ref_id) { on_dispose_reference(ref_id); }
+            [this](std::uint64_t ref_id) { on_dispose_reference(ref_id); },
+            [this](std::uint64_t ref_id) { on_fetch_reference(ref_id); }
           );
           attach_session(rpc_, sess_);
           rpc_.template on_message<api_message>(
@@ -83,17 +86,22 @@ namespace waos {
         }
 
         rpc_type& rpc() { return rpc_; }
-        session& sess() { return sess_; }
+        session_api& sess() { return sess_; }
+        session_state& state() { return *state_; }
 
       private:
         struct ref_slot {
           std::uint64_t stream_id = 0;
           std::uint32_t api_id = 0;
+          std::uint64_t function_id = 0;
+          std::vector<literal_expr> literals;
           bool observed = false;
+          bool scan = false;
           std::vector<binary> pending;
         };
 
-        session sess_;
+        std::shared_ptr<session_state> state_;
+        session_api sess_;
         std::map<std::uint32_t, std::shared_ptr<endpoint_ref>> endpoints_;
         std::map<std::uint64_t, ref_slot> refs_;
         std::map<std::uint64_t, std::uint64_t> stream_to_ref_;
@@ -126,10 +134,14 @@ namespace waos {
               }
               binary rewritten = rewrite_inner_stream_id(std::move(payload), ref_it->second);
               if(!slot_it->second.observed) {
-                slot_it->second.pending.push_back(std::move(rewritten));
-                return;
+                slot_it->second.pending.push_back(rewritten);
+              } else {
+                send_api_message(api_id, rewritten);
               }
-              send_api_message(api_id, rewritten);
+              if(slot_it->second.scan
+                  && (*type_index == inner_stream_done || *type_index == inner_stream_error)) {
+                complete_scan(slot_it->second);
+              }
             });
           }
         }
@@ -169,17 +181,14 @@ namespace waos {
         void on_set_reference(std::uint64_t ref_id, const expr& value) {
           direct_call call = validate_direct_expr(value);
           drop_ref(ref_id);
-          std::uint64_t stream_id = next_stream_id_++;
           ref_slot slot;
-          slot.stream_id = stream_id;
+          slot.stream_id = 0;
           slot.api_id = call.api_id;
-          refs_[ref_id] = slot;
-          stream_to_ref_[stream_id] = ref_id;
-          auto it = endpoints_.find(call.api_id);
-          if(it == endpoints_.end() || !it->second) {
-            throw std::runtime_error(error_unknown_api);
-          }
-          it->second->start_stream(stream_id, call.function_id, call.literals);
+          slot.function_id = call.function_id;
+          slot.literals = call.literals;
+          slot.observed = false;
+          slot.scan = false;
+          refs_[ref_id] = std::move(slot);
         }
 
         void on_observe_reference(std::uint64_t ref_id) {
@@ -187,12 +196,20 @@ namespace waos {
           if(it == refs_.end()) {
             return;
           }
+          start_ref_stream(ref_id, it->second, stream_flags::observe);
+          it->second.scan = false;
           it->second.observed = true;
-          std::vector<binary> queued = std::move(it->second.pending);
-          it->second.pending.clear();
-          for(const binary& frame : queued) {
-            send_api_message(it->second.api_id, frame);
+          flush_pending(it->second);
+        }
+
+        void on_fetch_reference(std::uint64_t ref_id) {
+          auto it = refs_.find(ref_id);
+          if(it == refs_.end()) {
+            return;
           }
+          start_ref_stream(ref_id, it->second, stream_flags::none);
+          it->second.observed = true;
+          flush_pending(it->second);
         }
 
         void on_unobserve_reference(std::uint64_t ref_id) {
@@ -207,6 +224,37 @@ namespace waos {
           drop_ref(ref_id);
         }
 
+        void start_ref_stream(std::uint64_t ref_id, ref_slot& slot, stream_flags flags) {
+          if(slot.stream_id != 0) {
+            return;
+          }
+          auto it = endpoints_.find(slot.api_id);
+          if(it == endpoints_.end() || !it->second) {
+            throw std::runtime_error(error_unknown_api);
+          }
+          slot.stream_id = next_stream_id_++;
+          slot.scan = flags == stream_flags::none;
+          stream_to_ref_[slot.stream_id] = ref_id;
+          it->second->start_stream(slot.stream_id, slot.function_id, slot.literals, flags);
+        }
+
+        void flush_pending(ref_slot& slot) {
+          std::vector<binary> queued = std::move(slot.pending);
+          slot.pending.clear();
+          for(const binary& frame : queued) {
+            send_api_message(slot.api_id, frame);
+          }
+        }
+
+        void complete_scan(ref_slot& slot) {
+          if(slot.stream_id == 0) {
+            return;
+          }
+          stream_to_ref_.erase(slot.stream_id);
+          slot.stream_id = 0;
+          slot.scan = false;
+        }
+
         void drop_ref(std::uint64_t ref_id) {
           auto it = refs_.find(ref_id);
           if(it == refs_.end()) {
@@ -214,10 +262,12 @@ namespace waos {
           }
           ref_slot slot = std::move(it->second);
           refs_.erase(it);
-          stream_to_ref_.erase(slot.stream_id);
-          auto ep = endpoints_.find(slot.api_id);
-          if(ep != endpoints_.end() && ep->second) {
-            ep->second->cancel_stream(slot.stream_id);
+          if(slot.stream_id != 0) {
+            stream_to_ref_.erase(slot.stream_id);
+            auto ep = endpoints_.find(slot.api_id);
+            if(ep != endpoints_.end() && ep->second) {
+              ep->second->cancel_stream(slot.stream_id);
+            }
           }
         }
 
@@ -227,7 +277,7 @@ namespace waos {
             return;
           }
           auto it = refs_.find(*ref_id);
-          if(it == refs_.end() || it->second.api_id != api_id) {
+          if(it == refs_.end() || it->second.api_id != api_id || it->second.stream_id == 0) {
             return;
           }
           auto ep = endpoints_.find(api_id);

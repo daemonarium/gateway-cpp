@@ -124,7 +124,7 @@ int main() {
     expect(u64_from_le(ref->sum().getEntries()[0].key) == 7_ul);
   };
 
-  "fetch resolves entries then unobserves"_test = [] {
+  "fetch resolves entries then ends the scan stream"_test = [] {
     pair sockets;
     std::shared_ptr<reference> ref;
     sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}))->on_resolved(
@@ -145,6 +145,51 @@ int main() {
     sockets.ep->pump();
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(obs.getEntries().size() == before);
+  };
+
+  "set_reference does not start a stream until observe"_test = [] {
+    pair sockets;
+    std::shared_ptr<reference> ref;
+    sockets.client->set_reference(7, make_call(1, 0, {}))->on_resolved(
+      [&](std::shared_ptr<reference>& r) { ref = r; }
+    );
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->sum().getEntries().size() == 0_ul);
+    expect(!ref->last_wire_stream_id().has_value());
+    ref->observe();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->sum().getEntries().size() == 1_ul);
+  };
+
+  "observe after fetch starts a new observe stream"_test = [] {
+    pair sockets;
+    std::shared_ptr<reference> ref;
+    sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}))->on_resolved(
+      [&](std::shared_ptr<reference>& r) { ref = r; }
+    );
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    auto& obs = ref->fetch();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(obs.state() == ObservableState::ready);
+    const std::size_t before = obs.getEntries().size();
+    waos::observable::BinaryEntry extra;
+    extra.key = u64_to_le(3);
+    extra.value = u64_to_le(9);
+    extra.ts = 9;
+    sockets.ep->push(extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(obs.getEntries().size() == before);
+    ref->observe();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    waos::observable::BinaryEntry live;
+    live.key = u64_to_le(3);
+    live.value = u64_to_le(11);
+    live.ts = 11;
+    sockets.ep->push(live);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(u64_from_le(obs.getEntries()[0].value) == 11_ul);
   };
 
   "dispose cancels and closes the observable"_test = [] {

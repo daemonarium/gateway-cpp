@@ -11,8 +11,8 @@
 namespace waos {
   namespace gateway {
 
-    // Pointer targets written by flat write_rest. Order is the wire type index
-    // and must match the DynamicObject order in make_session_description_blob.
+    // Pointer targets written by compressed write_rest. Order is the wire type
+    // index and must match the DynamicObject order in make_session_description_blob.
     template <typename Rpc>
     void register_session_pointer_types(Rpc& rpc) {
       rpc.channel().template register_dynamic_type<ref_expr_node>();

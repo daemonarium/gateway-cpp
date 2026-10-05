@@ -15,6 +15,7 @@
 #include "gateway/stream_endpoint.hpp"
 
 #include "observable/observable.hpp"
+#include "observable/stream_receiver.hpp"
 #include "observable/types.hpp"
 #include "serialization/promise.hpp"
 
@@ -25,10 +26,19 @@ using namespace waos::observable;
 namespace {
 
   void mux_roundtrip(socket_loopback_pair& sockets, auto& client, auto& server) {
-    sockets.transfer(sockets.s1, sockets.s0);
-    server.handle_data();
-    sockets.transfer(sockets.s0, sockets.s1);
-    client.handle_data();
+    for(int i = 0; i < 16; ++i) {
+      sockets.transfer(sockets.s1, sockets.s0);
+      server.handle_data();
+      server.handle_drain();
+      sockets.transfer(sockets.s0, sockets.s1);
+      client.handle_data();
+      client.handle_drain();
+      if(i >= 1
+          && socket_output_readable(sockets.s0) == 0
+          && socket_output_readable(sockets.s1) == 0) {
+        break;
+      }
+    }
   }
 
   std::string catch_rpc_error(std::exception_ptr ep) {
@@ -98,7 +108,7 @@ int main() {
     expect(u64_from_le(entries[0].value) == 1_ul);
     expect(obs.state() == ObservableState::ready);
     expect(ref->last_wire_stream_id().has_value());
-    expect(*ref->last_wire_stream_id() == 7_ul);
+    expect(*ref->last_wire_stream_id() != 0_ul);
     expect(ref->observables().size() == 1_ul);
   };
 
@@ -351,5 +361,76 @@ int main() {
       if(u64_from_le(entry.key) == 13) saw_a = true;
     }
     expect(saw_a == true);
+  };
+
+  "observe and fetch coexist on the same ref"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto live_sink = start_live(*ref);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->sum().state() == ObservableState::ready);
+    const auto live_id = *ref->last_wire_stream_id();
+    struct Rec : StreamReceiver {
+      std::size_t items = 0;
+      void onStreamOpened(waos::stream_opened&) override {}
+      void onStreamItem(waos::stream_item&) override { ++items; }
+      void onStreamKey(waos::stream_key&) override {}
+      void onStreamDone(waos::stream_done&) override {}
+      void onStreamError(waos::stream_error&) override {}
+      void onStreamReset(waos::stream_reset&) override {}
+    };
+    auto rec = std::make_shared<Rec>();
+    std::uint32_t fetch_id = 0;
+    sockets.client->fetch_reference(7, rec.get())->on_resolved([&](std::uint32_t id) {
+      fetch_id = id;
+    });
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(fetch_id != 0_u);
+    expect(static_cast<std::uint64_t>(fetch_id) != live_id);
+    expect(rec->items > 0_ul);
+    expect(sockets.client->socket_mux().has_socket(fetch_id) == false);
+    expect(sockets.client->socket_mux().has_socket(static_cast<std::uint32_t>(live_id)) == true);
+    BinaryEntry live_extra;
+    live_extra.key = u64_to_le(11);
+    live_extra.value = u64_to_le(11);
+    live_extra.ts = 11;
+    sockets.ep->push(live_extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw_live = false;
+    for(const auto& entry : ref->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 11) saw_live = true;
+    }
+    expect(saw_live == true);
+  };
+
+  "two fetches coexist"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto a_sink = std::make_shared<Sink>();
+    auto b_sink = std::make_shared<Sink>();
+    auto a = ref->stream();
+    auto b = ref->stream();
+    a->subscribe(a_sink);
+    b->subscribe(b_sink);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(a.get() != b.get());
+    expect(a->state() == ObservableState::ready);
+    expect(b->state() == ObservableState::ready);
+    auto live_sink = start_live(*ref);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->sum().state() == ObservableState::ready);
+    BinaryEntry extra;
+    extra.key = u64_to_le(12);
+    extra.value = u64_to_le(12);
+    extra.ts = 12;
+    sockets.ep->push(extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw = false;
+    for(const auto& entry : ref->sum().getEntries()) {
+      if(u64_from_le(entry.key) == 12) saw = true;
+    }
+    expect(saw == true);
   };
 }

@@ -44,28 +44,27 @@ namespace waos {
         using observable_type = waos::observable::Observable<entry_type>;
 
         reference(
-          std::uint64_t ref_id,
+          std::uint32_t ref_id,
           path key,
-          std::function<void(waos::observable::StreamReceiver*)> attach,
           std::shared_ptr<waos::observable::ReferenceOps> ops,
-          std::function<void(bool)> set_paused = {},
-          std::function<void()> detach = {}
+          std::function<void(std::uint32_t, bool)> set_paused = {},
+          std::function<void(std::uint32_t)> detach = {}
         )
           : waos::observable::RemoteReference<entry_type>(
               ops,
-              [ops, attach, set_paused, detach]() -> std::shared_ptr<observable_type> {
+              [ops, set_paused, detach]() -> std::shared_ptr<observable_type> {
                 return std::make_shared<GatewayObservable>(
-                  ops, attach, gateway_observe_mode::observe, set_paused, detach);
+                  ops, gateway_observe_mode::observe, set_paused, detach);
               },
-              [ops, attach, set_paused, detach]() -> std::shared_ptr<observable_type> {
+              [ops, set_paused, detach]() -> std::shared_ptr<observable_type> {
                 return std::make_shared<GatewayObservable>(
-                  ops, attach, gateway_observe_mode::fetch, set_paused, detach);
+                  ops, gateway_observe_mode::fetch, set_paused, detach);
               }
             ),
             ref_id_(ref_id),
             path_(std::move(key)) {}
 
-        std::uint64_t ref_id() const { return ref_id_; }
+        std::uint32_t ref_id() const { return ref_id_; }
         const path& key() const { return path_; }
 
         std::optional<std::uint64_t> last_wire_stream_id() const {
@@ -83,7 +82,7 @@ namespace waos {
         observable_type& sum() { return observable(); }
 
       private:
-        std::uint64_t ref_id_ = 0;
+        std::uint32_t ref_id_ = 0;
         path path_;
         std::map<path, observable_type*> by_path_;
     };

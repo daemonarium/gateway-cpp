@@ -58,10 +58,19 @@ namespace {
   }
 
   void mux_roundtrip(socket_loopback_pair& sockets, auto& client, auto& server) {
-    sockets.transfer(sockets.s1, sockets.s0);
-    server.handle_data();
-    sockets.transfer(sockets.s0, sockets.s1);
-    client.handle_data();
+    for(int i = 0; i < 16; ++i) {
+      sockets.transfer(sockets.s1, sockets.s0);
+      server.handle_data();
+      server.handle_drain();
+      sockets.transfer(sockets.s0, sockets.s1);
+      client.handle_data();
+      client.handle_drain();
+      if(i >= 1
+          && socket_output_readable(sockets.s0) == 0
+          && socket_output_readable(sockets.s1) == 0) {
+        break;
+      }
+    }
   }
 
   binary drain_output(uint32_t sock) {
@@ -104,6 +113,44 @@ namespace {
     std::uint64_t v = 0;
     std::memcpy(&v, bytes.data() + off, sizeof(v));
     return v;
+  }
+
+  std::size_t read_uvarint(const binary& bytes, std::size_t off, std::uint64_t& value) {
+    if(off >= bytes.size()) return 0;
+    const std::uint8_t n0 = bytes[off];
+    auto need = [&](std::size_t n) { return off + n <= bytes.size(); };
+    if((n0 & 0x80) == 0) {
+      value = n0;
+      return 1;
+    }
+    if((n0 & 0x40) == 0 && need(2)) {
+      value = (static_cast<std::uint64_t>(n0 & 0x3F) << 8) | bytes[off + 1];
+      return 2;
+    }
+    return 0;
+  }
+
+  std::uint64_t outer_type_index(const binary& frame) {
+    std::uint64_t type = 0;
+    read_uvarint(frame, 4, type);
+    return type;
+  }
+
+  std::uint64_t rpc_function_id(const binary& frame) {
+    std::size_t off = 4;
+    std::uint64_t type = 0, request_id = 0, function_id = 0;
+    off += read_uvarint(frame, off, type);
+    off += read_uvarint(frame, off, request_id);
+    read_uvarint(frame, off, function_id);
+    return function_id;
+  }
+
+  std::uint64_t api_message_id(const binary& frame) {
+    std::size_t off = 4;
+    std::uint64_t type = 0, api_id = 0;
+    off += read_uvarint(frame, off, type);
+    read_uvarint(frame, off, api_id);
+    return api_id;
   }
 
   binary make_ascii_blob(const char* tag) {
@@ -575,9 +622,9 @@ int main() {
     binary second;
     client.get_rpc_description(2)->on_resolved([&](binary& b) { second = b; });
     binary req2 = drain_output(sockets.s1);
-    expect(req2.size() >= 28_ul);
-    expect(read_u32_le(req2, 4) == 0_u);
-    expect(read_u64_le(req2, 20) == 2_ul);
+    expect(req2.size() >= 8_ul);
+    expect(outer_type_index(req2) == 0_ul);
+    expect(rpc_function_id(req2) == 2_ul);
     write_input(sockets.s0, req2);
     server.handle_data();
     sockets.transfer(sockets.s0, sockets.s1);
@@ -629,10 +676,10 @@ int main() {
     c2->rpc().call<std::uint64_t>(0, std::uint64_t{11})->on_resolved([&](std::uint64_t r) { r2 = r; });
     auto frames = drain_frames(&get_socket_info(sockets.s1)->output_buffer);
     expect(frames.size() == 2_ul);
-    expect(read_u32_le(frames[0], 4) == 3_u);
-    expect(read_u32_le(frames[0], 12) == 1_u);
-    expect(read_u32_le(frames[1], 4) == 3_u);
-    expect(read_u32_le(frames[1], 12) == 2_u);
+    expect(outer_type_index(frames[0]) == 3_ul);
+    expect(api_message_id(frames[0]) == 1_ul);
+    expect(outer_type_index(frames[1]) == 3_ul);
+    expect(api_message_id(frames[1]) == 2_ul);
     for(const auto& frame : frames) {
       write_input(sockets.s0, frame);
     }
@@ -669,8 +716,8 @@ int main() {
     }
     write_testdata("list_apis_req.hex", to_hex(list_req));
     write_testdata("list_apis_res.hex", to_hex(list_res));
-    expect(read_u32_le(list_req, 4) == 0_u);
-    expect(read_u64_le(list_req, 20) == 1_ul);
+    expect(outer_type_index(list_req) == 0_ul);
+    expect(rpc_function_id(list_req) == 1_ul);
 
     binary desc_req;
     binary desc_res;
@@ -695,8 +742,8 @@ int main() {
     }
     write_testdata("get_rpc_description_req.hex", to_hex(desc_req));
     write_testdata("get_rpc_description_res.hex", to_hex(desc_res));
-    expect(read_u32_le(desc_req, 4) == 0_u);
-    expect(read_u64_le(desc_req, 20) == 2_ul);
+    expect(outer_type_index(desc_req) == 0_ul);
+    expect(rpc_function_id(desc_req) == 2_ul);
 
     binary inner_err = encode_inner_rpc_error(1, error_unknown_api);
     write_testdata("inner_rpc_error_unknown_api.hex", to_hex(inner_err));
@@ -726,9 +773,9 @@ int main() {
     }
     write_testdata("api_message_echo_req.hex", to_hex(echo_req));
     write_testdata("api_message_echo_res.hex", to_hex(echo_res));
-    expect(read_u32_le(echo_req, 4) == 3_u);
-    expect(read_u32_le(echo_req, 12) == 1_u);
-    expect(read_u32_le(echo_res, 4) == 3_u);
+    expect(outer_type_index(echo_req) == 3_ul);
+    expect(api_message_id(echo_req) == 1_ul);
+    expect(outer_type_index(echo_res) == 3_ul);
 
 #ifdef GATEWAY_TESTDATA_DIR
     expect(read_testdata("list_apis_req.hex") == list_req);

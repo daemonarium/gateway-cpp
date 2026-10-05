@@ -82,16 +82,26 @@ namespace waos {
           feed(encode_stream_cancel(stream_id), true);
         }
 
-        // Extra change on the latest producer. Pending when the output buffer is tight.
+        // Extra change on every live producer. Pending when the output buffer is tight.
         std::shared_ptr<serialization::promise<void>> push(const waos::observable::BinaryEntry& entry) {
-          if(!last_) {
+          if(producers_.empty()) {
             throw std::runtime_error("no stream");
           }
-          waos::observable::Change change;
-          change.key = entry.key;
-          change.value = entry.value;
-          change.ts = entry.ts;
-          return last_->relay->onChange(std::move(change));
+          std::shared_ptr<serialization::promise<void>> blocked;
+          for(auto& [id, slot] : producers_) {
+            (void)id;
+            waos::observable::Change change;
+            change.key = entry.key;
+            change.value = entry.value;
+            change.ts = entry.ts;
+            auto pending = slot.relay->onChange(std::move(change));
+            if(pending && pending->state == serialization::promise_state::pending) {
+              blocked = pending;
+            } else if(!blocked) {
+              blocked = pending;
+            }
+          }
+          return blocked;
         }
 
         void pump() {

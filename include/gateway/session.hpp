@@ -79,7 +79,7 @@ namespace waos {
           return make_session_description_blob();
         }
 
-        void set_reference(std::uint64_t ref_id, expr value) {
+        void set_reference(std::uint32_t ref_id, expr value) {
           require_ready();
           if(!on_set_reference_) {
             throw std::runtime_error(error_unknown_api);
@@ -87,47 +87,68 @@ namespace waos {
           on_set_reference_(ref_id, value);
         }
 
-        void observe_reference(std::uint64_t ref_id) {
+        std::uint32_t observe_reference(std::uint32_t ref_id) {
           require_ready();
-          if(on_observe_reference_) {
-            on_observe_reference_(ref_id);
+          if(!on_observe_reference_) {
+            throw std::runtime_error(error_unknown_api);
           }
+          return on_observe_reference_(ref_id);
         }
 
-        void unobserve_reference(std::uint64_t ref_id) {
+        void unobserve_reference(std::uint32_t ref_id) {
           require_ready();
           if(on_unobserve_reference_) {
             on_unobserve_reference_(ref_id);
           }
         }
 
-        void dispose_reference(std::uint64_t ref_id) {
+        void dispose_reference(std::uint32_t ref_id) {
           require_ready();
           if(on_dispose_reference_) {
             on_dispose_reference_(ref_id);
           }
         }
 
-        void fetch_reference(std::uint64_t ref_id) {
+        std::uint32_t fetch_reference(std::uint32_t ref_id) {
           require_ready();
-          if(on_fetch_reference_) {
-            on_fetch_reference_(ref_id);
+          if(!on_fetch_reference_) {
+            throw std::runtime_error(error_unknown_api);
+          }
+          return on_fetch_reference_(ref_id);
+        }
+
+        std::uint32_t open_pipe(std::uint32_t cookie) {
+          require_ready();
+          if(!on_open_pipe_) {
+            throw std::runtime_error(error_unknown_api);
+          }
+          return on_open_pipe_(cookie);
+        }
+
+        void close_pipe(std::uint32_t socket_id) {
+          require_ready();
+          if(on_close_pipe_) {
+            on_close_pipe_(socket_id);
           }
         }
 
         [[=serialization::policy::ignore]]
         void set_observation_hooks(
-          std::function<void(std::uint64_t, const expr&)> on_set,
-          std::function<void(std::uint64_t)> on_observe,
-          std::function<void(std::uint64_t)> on_unobserve,
-          std::function<void(std::uint64_t)> on_dispose,
-          std::function<void(std::uint64_t)> on_fetch
+          std::function<void(std::uint32_t, const expr&)> on_set,
+          std::function<std::uint32_t(std::uint32_t)> on_observe,
+          std::function<void(std::uint32_t)> on_unobserve,
+          std::function<void(std::uint32_t)> on_dispose,
+          std::function<std::uint32_t(std::uint32_t)> on_fetch,
+          std::function<std::uint32_t(std::uint32_t)> on_open_pipe = {},
+          std::function<void(std::uint32_t)> on_close_pipe = {}
         ) {
           on_set_reference_ = std::move(on_set);
           on_observe_reference_ = std::move(on_observe);
           on_unobserve_reference_ = std::move(on_unobserve);
           on_dispose_reference_ = std::move(on_dispose);
           on_fetch_reference_ = std::move(on_fetch);
+          on_open_pipe_ = std::move(on_open_pipe);
+          on_close_pipe_ = std::move(on_close_pipe);
         }
 
         [[=serialization::policy::ignore]]
@@ -162,19 +183,25 @@ namespace waos {
         state state_ = state::pre_handshake;
 
         [[=serialization::policy::ignore]]
-        std::function<void(std::uint64_t, const expr&)> on_set_reference_;
+        std::function<void(std::uint32_t, const expr&)> on_set_reference_;
 
         [[=serialization::policy::ignore]]
-        std::function<void(std::uint64_t)> on_observe_reference_;
+        std::function<std::uint32_t(std::uint32_t)> on_observe_reference_;
 
         [[=serialization::policy::ignore]]
-        std::function<void(std::uint64_t)> on_unobserve_reference_;
+        std::function<void(std::uint32_t)> on_unobserve_reference_;
 
         [[=serialization::policy::ignore]]
-        std::function<void(std::uint64_t)> on_dispose_reference_;
+        std::function<void(std::uint32_t)> on_dispose_reference_;
 
         [[=serialization::policy::ignore]]
-        std::function<void(std::uint64_t)> on_fetch_reference_;
+        std::function<std::uint32_t(std::uint32_t)> on_fetch_reference_;
+
+        [[=serialization::policy::ignore]]
+        std::function<std::uint32_t(std::uint32_t)> on_open_pipe_;
+
+        [[=serialization::policy::ignore]]
+        std::function<void(std::uint32_t)> on_close_pipe_;
 
         void apply_handshake(handshake_data data) {
           if(data.protocol_version != protocol_version_v1) {

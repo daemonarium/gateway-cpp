@@ -17,10 +17,10 @@ namespace waos {
       public:
         GatewayReferenceOps(
           std::function<void()> set,
-          std::function<std::shared_ptr<serialization::promise<void>>()> observe,
-          std::function<std::shared_ptr<serialization::promise<void>>()> fetch,
-          std::function<std::shared_ptr<serialization::promise<void>>()> unobserve,
-          std::function<std::shared_ptr<serialization::promise<void>>()> dispose
+          std::function<void(waos::observable::StreamReceiver*)> observe,
+          std::function<void(waos::observable::StreamReceiver*)> fetch,
+          std::function<void()> unobserve,
+          std::function<void()> dispose
         )
           : set_(std::move(set)),
             observe_(std::move(observe)),
@@ -36,12 +36,12 @@ namespace waos {
           set_();
         }
 
-        void observe(waos::observable::StreamReceiver*) override {
-          if(observe_) observe_();
+        void observe(waos::observable::StreamReceiver* receiver) override {
+          if(observe_) observe_(receiver);
         }
 
-        void fetch(waos::observable::StreamReceiver*) override {
-          if(fetch_) fetch_();
+        void fetch(waos::observable::StreamReceiver* receiver) override {
+          if(fetch_) fetch_(receiver);
         }
 
         void unobserve() override {
@@ -55,10 +55,10 @@ namespace waos {
 
       private:
         std::function<void()> set_;
-        std::function<std::shared_ptr<serialization::promise<void>>()> observe_;
-        std::function<std::shared_ptr<serialization::promise<void>>()> fetch_;
-        std::function<std::shared_ptr<serialization::promise<void>>()> unobserve_;
-        std::function<std::shared_ptr<serialization::promise<void>>()> dispose_;
+        std::function<void(waos::observable::StreamReceiver*)> observe_;
+        std::function<void(waos::observable::StreamReceiver*)> fetch_;
+        std::function<void()> unobserve_;
+        std::function<void()> dispose_;
         bool sent_ = false;
     };
 

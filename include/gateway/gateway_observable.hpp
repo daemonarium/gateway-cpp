@@ -27,19 +27,25 @@ namespace waos {
 
         GatewayObservable(
           std::shared_ptr<waos::observable::ReferenceOps> ops,
-          std::function<void(waos::observable::StreamReceiver*)> attach,
           gateway_observe_mode mode,
-          std::function<void(bool)> set_paused = {},
-          std::function<void()> detach = {}
+          std::function<void(std::uint32_t, bool)> set_paused = {},
+          std::function<void(std::uint32_t)> detach = {}
         )
           : ops_(std::move(ops)),
-            attach_(std::move(attach)),
             mode_(mode),
             set_paused_(std::move(set_paused)),
             detach_(std::move(detach)) {}
 
         std::optional<std::uint64_t> last_wire_stream_id() const {
           return last_wire_stream_id_;
+        }
+
+        void set_mux_socket_id(std::uint32_t socket_id) {
+          mux_socket_id_ = socket_id;
+        }
+
+        std::optional<std::uint32_t> mux_socket_id() const {
+          return mux_socket_id_;
         }
 
         void onStreamOpened(waos::stream_opened&) override {}
@@ -67,7 +73,6 @@ namespace waos {
 
       protected:
         void onStart() override {
-          if(attach_) attach_(this);
           attached_ = true;
           if(!ops_) return;
           if(mode_ == gateway_observe_mode::observe) ops_->observe(this);
@@ -77,28 +82,27 @@ namespace waos {
         void onStop() override {
           if(ops_ && mode_ == gateway_observe_mode::observe) ops_->unobserve();
           if(attached_) {
-            if(detach_) detach_();
-            else if(attach_) attach_(nullptr);
+            if(detach_ && mux_socket_id_) detach_(*mux_socket_id_);
             attached_ = false;
           }
         }
 
         void onPause() override {
-          if(set_paused_) set_paused_(true);
+          if(set_paused_ && mux_socket_id_) set_paused_(*mux_socket_id_, true);
         }
 
         void onResume() override {
-          if(set_paused_) set_paused_(false);
+          if(set_paused_ && mux_socket_id_) set_paused_(*mux_socket_id_, false);
         }
 
       private:
         std::shared_ptr<waos::observable::ReferenceOps> ops_;
-        std::function<void(waos::observable::StreamReceiver*)> attach_;
         gateway_observe_mode mode_ = gateway_observe_mode::observe;
-        std::function<void(bool)> set_paused_;
-        std::function<void()> detach_;
+        std::function<void(std::uint32_t, bool)> set_paused_;
+        std::function<void(std::uint32_t)> detach_;
         bool attached_ = false;
         std::optional<std::uint64_t> last_wire_stream_id_;
+        std::optional<std::uint32_t> mux_socket_id_;
     };
 
   }

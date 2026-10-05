@@ -3,6 +3,7 @@
 #include "gateway/api_connection.hpp"
 #include "gateway/expr.hpp"
 #include "gateway/generated/session_rpc_client.hpp"
+#include "gateway/gateway_observable.hpp"
 #include "gateway/gateway_reference_ops.hpp"
 #include "gateway/reference.hpp"
 #include "gateway/session_rpc.hpp"
@@ -10,9 +11,11 @@
 #include "gateway/virtual_stream_socket.hpp"
 
 #include "observable/socket_mux.hpp"
+#include "serialization/compressed_codec.hpp"
 #include "serialization/promise.hpp"
 #include "serialization/socket_rpc_client.hpp"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -24,7 +27,7 @@
 namespace waos {
   namespace gateway {
 
-    template <typename Codec = serialization::flat_materialized_codec,
+    template <typename Codec = serialization::compressed_codec,
               typename Transport = serialization::socket_c_transport>
     class session_client {
       public:
@@ -53,11 +56,13 @@ namespace waos {
             })
           );
           typename mux_type::Options opt;
-          opt.on_data = [this](std::uint64_t id, const binary& payload) {
-            ensure_virtual(id).deliver(payload);
+          opt.on_data = [this](std::uint32_t id, const binary& payload) {
+            on_mux_data(id, payload);
           };
-          opt.on_open = [this](std::uint64_t id) { ensure_virtual(id); };
-          opt.on_close = [this](std::uint64_t id) { on_mux_close(id); };
+          opt.on_open = [this](std::uint32_t id, std::uint8_t kind, std::uint32_t ref_id, std::uint32_t cookie) {
+            on_mux_open(id, kind, ref_id, cookie);
+          };
+          opt.on_close = [this](std::uint32_t id) { on_mux_close(id); };
           socket_mux_.emplace(rpc_->channel(), std::move(opt));
         }
 
@@ -119,7 +124,7 @@ namespace waos {
         }
 
         std::shared_ptr<reference> set_reference(
-          std::uint64_t ref_id,
+          std::uint32_t ref_id,
           expr value
         ) {
           direct_call call = validate_direct_expr(value);
@@ -131,34 +136,63 @@ namespace waos {
         }
 
         std::shared_ptr<serialization::promise<void>> send_set_reference(
-          std::uint64_t ref_id,
+          std::uint32_t ref_id,
           expr value
         ) {
           return api_.set_reference(ref_id, value);
         }
 
-        std::shared_ptr<serialization::promise<void>> observe_reference(std::uint64_t ref_id) {
-          ensure_mux_socket(ref_id);
+        std::shared_ptr<serialization::promise<std::uint32_t>> observe_reference(
+          std::uint32_t ref_id,
+          waos::observable::StreamReceiver* receiver = nullptr
+        ) {
+          if(receiver) pending_observe_[ref_id] = receiver;
           return api_.observe_reference(ref_id);
         }
 
-        std::shared_ptr<serialization::promise<void>> unobserve_reference(std::uint64_t ref_id) {
+        std::shared_ptr<serialization::promise<void>> unobserve_reference(std::uint32_t ref_id) {
+          pending_observe_.erase(ref_id);
           return api_.unobserve_reference(ref_id);
         }
 
-        std::shared_ptr<serialization::promise<void>> fetch_reference(std::uint64_t ref_id) {
-          ensure_mux_socket(ref_id);
+        std::shared_ptr<serialization::promise<std::uint32_t>> fetch_reference(
+          std::uint32_t ref_id,
+          waos::observable::StreamReceiver* receiver = nullptr
+        ) {
+          if(receiver) pending_fetch_[ref_id].push_back(receiver);
           return api_.fetch_reference(ref_id);
         }
 
-        std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint64_t ref_id) {
-          if(socket_mux_) socket_mux_->close_socket(ref_id);
-          on_mux_close(ref_id);
+        std::shared_ptr<serialization::promise<void>> dispose_reference(std::uint32_t ref_id) {
+          pending_observe_.erase(ref_id);
+          pending_fetch_.erase(ref_id);
           refs_.erase(ref_id);
           return api_.dispose_reference(ref_id);
         }
 
-        std::shared_ptr<reference> find_reference(std::uint64_t ref_id) const {
+        std::shared_ptr<serialization::promise<std::uint32_t>> open_pipe(std::uint32_t cookie) {
+          return api_.open_pipe(cookie);
+        }
+
+        std::shared_ptr<serialization::promise<void>> close_pipe(std::uint32_t socket_id) {
+          if(socket_mux_) socket_mux_->close_socket(socket_id);
+          on_mux_close(socket_id);
+          return api_.close_pipe(socket_id);
+        }
+
+        void send_pipe(std::uint32_t socket_id, binary payload) {
+          if(socket_mux_) socket_mux_->send_data(socket_id, std::move(payload));
+        }
+
+        void on_pipe(std::function<void(std::uint32_t, std::uint32_t)> handler) {
+          on_pipe_ = std::move(handler);
+        }
+
+        void on_pipe_data(std::function<void(std::uint32_t, const binary&)> handler) {
+          on_pipe_data_ = std::move(handler);
+        }
+
+        std::shared_ptr<reference> find_reference(std::uint32_t ref_id) const {
           auto it = refs_.find(ref_id);
           if(it == refs_.end()) {
             return nullptr;
@@ -166,19 +200,18 @@ namespace waos {
           return it->second;
         }
 
-        stream_mux_type& get_stream_multiplexer(std::uint64_t ref_id) {
-          ensure_mux_socket(ref_id);
-          return virtuals_.at(ref_id)->mux();
+        stream_mux_type& get_stream_multiplexer(std::uint32_t socket_id) {
+          return ensure_virtual(socket_id).mux();
         }
 
-        void set_mux_paused(std::uint64_t ref_id, bool paused) {
-          if(socket_mux_) socket_mux_->set_paused(ref_id, paused);
+        void set_mux_paused(std::uint32_t socket_id, bool paused) {
+          if(socket_mux_) socket_mux_->set_paused(socket_id, paused);
         }
 
-        void detach_mux_receiver(std::uint64_t ref_id) {
-          auto it = virtuals_.find(ref_id);
+        void detach_mux_receiver(std::uint32_t socket_id) {
+          auto it = virtuals_.find(socket_id);
           if(it != virtuals_.end()) {
-            it->second->mux().attachReceiver(ref_id, nullptr);
+            it->second->mux().attachReceiver(socket_id, nullptr);
           }
         }
 
@@ -212,45 +245,103 @@ namespace waos {
         }
 
       private:
+        struct SocketEntry {
+          std::uint8_t kind = 0;
+          std::uint32_t ref_id = 0;
+          std::uint32_t cookie = 0;
+        };
+
         std::shared_ptr<rpc_type> rpc_;
         session_rpc<rpc_type> api_;
         std::optional<handshake_data> handshake_;
         std::map<std::uint32_t, binary> hashes_;
         std::map<std::uint32_t, std::pair<binary, binary>> blobs_;
         std::map<std::uint32_t, std::unique_ptr<api_connection>> connections_;
-        std::map<std::uint64_t, std::shared_ptr<reference>> refs_;
+        std::map<std::uint32_t, std::shared_ptr<reference>> refs_;
         std::optional<mux_type> socket_mux_;
-        std::map<std::uint64_t, std::unique_ptr<virtual_stream_socket>> virtuals_;
-        std::set<std::uint64_t> granted_;
+        std::map<std::uint32_t, std::unique_ptr<virtual_stream_socket>> virtuals_;
+        std::set<std::uint32_t> granted_;
+        std::map<std::uint32_t, SocketEntry> entries_;
+        std::map<std::uint32_t, waos::observable::StreamReceiver*> pending_observe_;
+        std::map<std::uint32_t, std::deque<waos::observable::StreamReceiver*>> pending_fetch_;
+        std::function<void(std::uint32_t, std::uint32_t)> on_pipe_;
+        std::function<void(std::uint32_t, const binary&)> on_pipe_data_;
 
-        virtual_stream_socket& ensure_virtual(std::uint64_t id) {
+        virtual_stream_socket& ensure_virtual(std::uint32_t id) {
           auto it = virtuals_.find(id);
           if(it != virtuals_.end()) return *it->second;
           auto slot = std::make_unique<virtual_stream_socket>([this, id](std::size_t n) {
-            if(socket_mux_) socket_mux_->grant_window(id, n);
+            if(socket_mux_) socket_mux_->grant_window(id, static_cast<std::uint32_t>(n));
           });
           virtual_stream_socket& ref = *slot;
           virtuals_[id] = std::move(slot);
           return ref;
         }
 
-        void ensure_mux_socket(std::uint64_t ref_id) {
-          ensure_virtual(ref_id);
-          if(socket_mux_ && !socket_mux_->has_socket(ref_id)) {
-            socket_mux_->open_socket(ref_id);
-          }
-          if(granted_.insert(ref_id).second && socket_mux_) {
-            socket_mux_->grant_window(ref_id, socket_mux_->default_window_bytes());
+        void grant_if_needed(std::uint32_t id) {
+          if(granted_.insert(id).second && socket_mux_) {
+            socket_mux_->grant_window(id, static_cast<std::uint32_t>(socket_mux_->default_window_bytes()));
           }
         }
 
-        void on_mux_close(std::uint64_t id) {
+        void bind_receiver(std::uint32_t socket_id, waos::observable::StreamReceiver* receiver) {
+          if(!receiver) return;
+          ensure_virtual(socket_id).mux().attachReceiver(socket_id, receiver);
+          if(auto* go = dynamic_cast<GatewayObservable*>(receiver)) {
+            go->set_mux_socket_id(socket_id);
+          }
+        }
+
+        void on_mux_open(
+          std::uint32_t id,
+          std::uint8_t kind,
+          std::uint32_t ref_id,
+          std::uint32_t cookie
+        ) {
+          entries_[id] = SocketEntry{kind, ref_id, cookie};
+          grant_if_needed(id);
+          if(kind == mux_kind_pipe) {
+            if(on_pipe_) on_pipe_(id, cookie);
+            return;
+          }
+          if(kind == mux_kind_observe) {
+            auto it = pending_observe_.find(ref_id);
+            if(it != pending_observe_.end()) {
+              bind_receiver(id, it->second);
+              pending_observe_.erase(it);
+            }
+            return;
+          }
+          if(kind == mux_kind_fetch) {
+            auto it = pending_fetch_.find(ref_id);
+            if(it != pending_fetch_.end() && !it->second.empty()) {
+              bind_receiver(id, it->second.front());
+              it->second.pop_front();
+              if(it->second.empty()) pending_fetch_.erase(it);
+            }
+          }
+        }
+
+        void on_mux_data(std::uint32_t id, const binary& payload) {
+          auto entry = entries_.find(id);
+          if(entry != entries_.end() && entry->second.kind == mux_kind_pipe) {
+            if(on_pipe_data_) on_pipe_data_(id, payload);
+            if(socket_mux_ && !payload.empty()) {
+              socket_mux_->grant_window(id, static_cast<std::uint32_t>(payload.size()));
+            }
+            return;
+          }
+          ensure_virtual(id).deliver(payload);
+        }
+
+        void on_mux_close(std::uint32_t id) {
           virtuals_.erase(id);
           granted_.erase(id);
+          entries_.erase(id);
         }
 
         std::shared_ptr<reference> adopt_reference(
-          std::uint64_t ref_id,
+          std::uint32_t ref_id,
           const direct_call& call,
           expr value
         ) {
@@ -261,20 +352,21 @@ namespace waos {
           }
           auto ops = std::make_shared<GatewayReferenceOps>(
             [this, ref_id, value]() { api_.set_reference(ref_id, value); },
-            [this, ref_id]() { return observe_reference(ref_id); },
-            [this, ref_id]() { return fetch_reference(ref_id); },
-            [this, ref_id]() { return unobserve_reference(ref_id); },
-            [this, ref_id]() { return api_.dispose_reference(ref_id); }
+            [this, ref_id](waos::observable::StreamReceiver* receiver) {
+              observe_reference(ref_id, receiver);
+            },
+            [this, ref_id](waos::observable::StreamReceiver* receiver) {
+              fetch_reference(ref_id, receiver);
+            },
+            [this, ref_id]() { unobserve_reference(ref_id); },
+            [this, ref_id]() { api_.dispose_reference(ref_id); }
           );
           auto ref = std::make_shared<reference>(
             ref_id,
             path{call.api_id, call.function_id, std::move(args)},
-            [this, ref_id](waos::observable::StreamReceiver* receiver) {
-              get_stream_multiplexer(ref_id).attachReceiver(ref_id, receiver);
-            },
             std::move(ops),
-            [this, ref_id](bool paused) { set_mux_paused(ref_id, paused); },
-            [this, ref_id]() { detach_mux_receiver(ref_id); }
+            [this](std::uint32_t socket, bool paused) { set_mux_paused(socket, paused); },
+            [this](std::uint32_t socket) { detach_mux_receiver(socket); }
           );
           refs_[ref_id] = ref;
           return ref;

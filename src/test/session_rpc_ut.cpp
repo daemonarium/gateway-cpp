@@ -18,6 +18,7 @@
 #include "gateway/session.hpp"
 #include "gateway/session_rpc.hpp"
 
+#include "serialization/compressed_codec.hpp"
 #include "serialization/flat_materialized_codec.hpp"
 #include "serialization/socket_message_channel.hpp"
 #include "serialization/socket_rpc_client.hpp"
@@ -32,8 +33,8 @@ using namespace boost::ut;
 
 namespace {
 
-  using flat_socket_rpc_server = socket_rpc_server<flat_materialized_codec>;
-  using flat_socket_rpc_client = socket_rpc_client<flat_materialized_codec>;
+  using session_rpc_server = compressed_socket_rpc_server;
+  using session_rpc_client = compressed_socket_rpc_client;
 
   struct [[=serialization::message()]] ping {
     std::uint64_t seq = 0;
@@ -112,8 +113,8 @@ namespace {
   }
 
   void rpc_roundtrip(socket_loopback_pair& sockets,
-                     flat_socket_rpc_client& client,
-                     flat_socket_rpc_server& server) {
+                     session_rpc_client& client,
+                     session_rpc_server& server) {
     sockets.transfer(sockets.s1, sockets.s0);
     server.handle_data();
     sockets.transfer(sockets.s0, sockets.s1);
@@ -161,8 +162,8 @@ namespace {
 int main() {
   "api_message type index is 3"_test = [] {
     socket_loopback_pair sockets;
-    flat_socket_message_channel ch0(sockets.s0);
-    flat_socket_message_channel ch1(sockets.s1);
+    socket_message_channel ch0(sockets.s0);
+    socket_message_channel ch1(sockets.s1);
 
     ch0.register_message_type<rpc_request>();
     ch0.register_message_type<rpc_response>();
@@ -204,8 +205,8 @@ int main() {
     binary copied;
     {
       socket_loopback_pair session_sockets;
-      flat_socket_message_channel outer_send(session_sockets.s0);
-      flat_socket_message_channel outer_recv(session_sockets.s1);
+      socket_message_channel outer_send(session_sockets.s0);
+      socket_message_channel outer_recv(session_sockets.s1);
     outer_send.register_message_type<rpc_request>();
     outer_send.register_message_type<rpc_response>();
     outer_send.register_message_type<rpc_error>();
@@ -268,8 +269,8 @@ int main() {
     }
 
     socket_loopback_pair session_sockets;
-    flat_socket_message_channel outer_send(session_sockets.s0);
-    flat_socket_message_channel outer_recv(session_sockets.s1);
+    socket_message_channel outer_send(session_sockets.s0);
+    socket_message_channel outer_recv(session_sockets.s1);
     for(auto* ch : {&outer_send, &outer_recv}) {
       ch->register_message_type<rpc_request>();
       ch->register_message_type<rpc_response>();
@@ -309,8 +310,8 @@ int main() {
   "hello version 1 returns server_protocol 1"_test = [] {
     socket_loopback_pair sockets;
     session_api sess(std::make_shared<session_state>(sample_publications()));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -328,8 +329,8 @@ int main() {
   "wrong hello version errors and later list_apis also errors"_test = [] {
     socket_loopback_pair sockets;
     session_api sess(std::make_shared<session_state>(sample_publications()));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -351,8 +352,8 @@ int main() {
   "list_apis before hello is handshake_required"_test = [] {
     socket_loopback_pair sockets;
     session_api sess(std::make_shared<session_state>(sample_publications()));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -367,8 +368,8 @@ int main() {
   "constructor handshake_data skips hello"_test = [] {
     socket_loopback_pair sockets;
     session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}}));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -391,8 +392,8 @@ int main() {
     binary hash_alpha = xxh3_64_le(pubs[0].description_blob);
     binary hash_beta = xxh3_64_le(pubs[1].description_blob);
     session_api sess(std::make_shared<session_state>(pubs, default_visibility, client_protocol{protocol_version_v1, {}}));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -431,8 +432,8 @@ int main() {
     auth_map auth;
     auth.emplace("hidden", pack_hidden_ids({2}));
     session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, auth}));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -462,8 +463,8 @@ int main() {
   "get_session_description blob has methods 0-3, fetch_reference and api_message"_test = [] {
     socket_loopback_pair sockets;
     session_api sess(std::make_shared<session_state>(sample_publications(), default_visibility, client_protocol{protocol_version_v1, {}}));
-    flat_socket_rpc_server server(sockets.s0);
-    flat_socket_rpc_client client(sockets.s1);
+    session_rpc_server server(sockets.s0);
+    session_rpc_client client(sockets.s1);
     attach_session(server, sess);
     register_session_channel(client);
 
@@ -493,12 +494,26 @@ int main() {
         }
       }
     }
-    expect(method_names.size() >= 9_ul);
+    expect(method_names.size() >= 11_ul);
     expect(method_names[0].find("hello") != std::string::npos);
     expect(method_names[1].find("list_apis") != std::string::npos);
     expect(method_names[2].find("get_rpc_description") != std::string::npos);
     expect(method_names[3].find("get_session_description") != std::string::npos);
     expect(method_names[8].find("fetch_reference") != std::string::npos);
+    expect(method_names[9].find("open_pipe") != std::string::npos);
+    expect(method_names[10].find("close_pipe") != std::string::npos);
+    bool saw_open = false;
+    for(const auto& type : reg.get_types()) {
+      if(type->getName() != "mux_socket_open") continue;
+      saw_open = true;
+      expect(type->getMember("socket_id") != nullptr);
+      expect(type->getMember("kind") != nullptr);
+      expect(type->getMember("ref_id") != nullptr);
+      expect(type->getMember("cookie") != nullptr);
+      expect(type->getMember("socket_id")->getName() == "uint32");
+      expect(type->getMember("kind")->getName() == "uint8");
+    }
+    expect(saw_open);
   };
 
   "dump golden hello and api_message hex"_test = [] {
@@ -506,8 +521,8 @@ int main() {
     {
       socket_loopback_pair hello_sockets;
       session_api sess(std::make_shared<session_state>(sample_publications()));
-      flat_socket_rpc_server server(hello_sockets.s0);
-      flat_socket_rpc_client client(hello_sockets.s1);
+      session_rpc_server server(hello_sockets.s0);
+      session_rpc_client client(hello_sockets.s1);
       attach_session(server, sess);
       register_session_channel(client);
       client.call<server_protocol>(0, client_protocol{protocol_version_v1, {}});
@@ -528,7 +543,7 @@ int main() {
     binary api_frame;
     {
       socket_loopback_pair outer;
-      flat_socket_message_channel outer_send(outer.s0);
+      socket_message_channel outer_send(outer.s0);
       outer_send.register_message_type<rpc_request>();
       outer_send.register_message_type<rpc_response>();
       outer_send.register_message_type<rpc_error>();
@@ -543,7 +558,7 @@ int main() {
 
     socket_loopback_pair verify;
     write_input(verify.s1, api_frame);
-    flat_socket_message_channel outer_recv(verify.s1);
+    socket_message_channel outer_recv(verify.s1);
     outer_recv.register_message_type<rpc_request>();
     outer_recv.register_message_type<rpc_response>();
     outer_recv.register_message_type<rpc_error>();

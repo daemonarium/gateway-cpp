@@ -1,6 +1,9 @@
 #include <boost/ut.hpp>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -91,6 +94,69 @@ namespace {
     auto sink = std::make_shared<Sink>();
     ref.observable().subscribe(sink);
     return sink;
+  }
+
+  constexpr std::uint32_t kFrameLenSize = 4;
+  constexpr std::uint64_t kRpcRequestType = 0;
+  constexpr std::uint64_t kObserveReferenceFn = 5;
+  constexpr std::uint64_t kFetchReferenceFn = 8;
+
+  binary peek_output(std::uint32_t sock) {
+    struct socket_info* info = get_socket_info(static_cast<int>(sock));
+    const std::size_t n = circular_buffer_readable_bytes(&info->output_buffer);
+    binary out(n);
+    if(n > 0) {
+      circular_buffer_peek(&info->output_buffer, 0, out.data(), n);
+    }
+    return out;
+  }
+
+  std::size_t read_uvarint(const binary& bytes, std::size_t off, std::uint64_t& value) {
+    if(off >= bytes.size()) return 0;
+    const std::uint8_t n0 = bytes[off];
+    auto need = [&](std::size_t n) { return off + n <= bytes.size(); };
+    if((n0 & 0x80) == 0) {
+      value = n0;
+      return 1;
+    }
+    if((n0 & 0x40) == 0 && need(2)) {
+      value = (static_cast<std::uint64_t>(n0 & 0x3F) << 8) | bytes[off + 1];
+      return 2;
+    }
+    return 0;
+  }
+
+  std::uint64_t rpc_function_id(const binary& frame) {
+    std::size_t off = kFrameLenSize;
+    std::uint64_t type = 0, request_id = 0, function_id = 0;
+    off += read_uvarint(frame, off, type);
+    off += read_uvarint(frame, off, request_id);
+    read_uvarint(frame, off, function_id);
+    return function_id;
+  }
+
+  std::vector<std::uint64_t> rpc_function_ids(const binary& bytes) {
+    std::vector<std::uint64_t> ids;
+    std::size_t off = 0;
+    while(off + kFrameLenSize <= bytes.size()) {
+      std::uint32_t len = 0;
+      std::memcpy(&len, bytes.data() + off, sizeof(len));
+      if(off + kFrameLenSize + len > bytes.size()) break;
+      binary frame(bytes.begin() + static_cast<std::ptrdiff_t>(off),
+        bytes.begin() + static_cast<std::ptrdiff_t>(off + kFrameLenSize + len));
+      std::uint64_t type = 0;
+      read_uvarint(frame, kFrameLenSize, type);
+      if(type == kRpcRequestType) {
+        ids.push_back(rpc_function_id(frame));
+      }
+      off += kFrameLenSize + len;
+    }
+    return ids;
+  }
+
+  bool has_rpc_fn(const binary& bytes, std::uint64_t fn) {
+    const auto ids = rpc_function_ids(bytes);
+    return std::find(ids.begin(), ids.end(), fn) != ids.end();
   }
 
 }
@@ -384,6 +450,7 @@ int main() {
     sockets.client->fetch_reference(7, rec.get())->on_resolved([&](std::uint32_t id) {
       fetch_id = id;
     });
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kFetchReferenceFn) == true);
     mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
     expect(fetch_id != 0_u);
     expect(static_cast<std::uint64_t>(fetch_id) != live_id);
@@ -430,6 +497,39 @@ int main() {
     bool saw = false;
     for(const auto& entry : ref->sum().getEntries()) {
       if(u64_from_le(entry.key) == 12) saw = true;
+    }
+    expect(saw == true);
+  };
+
+  "stream during live observe does not fetch"_test = [] {
+    pair sockets;
+    auto ref = sockets.client->set_reference(7, make_call(1, 0, {make_literal_u64(3)}));
+    auto live_sink = start_live(*ref);
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    expect(ref->sum().state() == ObservableState::ready);
+    const auto live_id = *ref->last_wire_stream_id();
+    const std::size_t pending_before = socket_output_readable(sockets.sockets.s1);
+    auto scan = ref->stream();
+    expect(scan.get() == ref->peekLive().get());
+    expect(socket_output_readable(sockets.sockets.s1) == pending_before);
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kFetchReferenceFn) == false);
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kObserveReferenceFn) == false);
+    auto replay = std::make_shared<Sink>();
+    scan->subscribe(replay);
+    expect(u64_from_le(scan->getEntries()[0].key) == 3_ul);
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kFetchReferenceFn) == false);
+    expect(has_rpc_fn(peek_output(sockets.sockets.s1), kObserveReferenceFn) == false);
+    expect(sockets.client->socket_mux().has_socket(static_cast<std::uint32_t>(live_id)) == true);
+    BinaryEntry extra;
+    extra.key = u64_to_le(11);
+    extra.value = u64_to_le(11);
+    extra.ts = 11;
+    sockets.ep->push(extra);
+    sockets.ep->pump();
+    mux_roundtrip(sockets.sockets, *sockets.client, *sockets.server);
+    bool saw = false;
+    for(const auto& entry : scan->getEntries()) {
+      if(u64_from_le(entry.key) == 11) saw = true;
     }
     expect(saw == true);
   };

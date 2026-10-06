@@ -84,6 +84,18 @@ if(NOT WASM)
   add_test(NAME gateway_pipe_ut COMMAND gateway_pipe_ut WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 endif()
 
+if(EMSCRIPTEN)
+  add_library(gateway_session_client_lib OBJECT
+    ${WASM_FILES}
+    ${IO_FILES}
+    ${SOCKET_FILES}
+  )
+  target_include_directories(gateway_session_client_lib PUBLIC
+    include
+    ${CMAKE_SOURCE_DIR}/cpp-rpc/src
+  )
+endif()
+
 if(WASM)
   add_executable(gateway_session_wasm
     src/module_main.cpp

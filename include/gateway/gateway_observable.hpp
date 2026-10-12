@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -19,6 +20,15 @@ namespace waos {
   namespace gateway {
 
     enum class gateway_observe_mode { observe, fetch };
+
+    class GatewayObservable;
+
+    // dynamic_cast from a plain StreamReceiver to GatewayObservable traps in
+    // emscripten. Index the adjusted StreamReceiver* instead.
+    inline std::map<waos::observable::StreamReceiver*, GatewayObservable*>& gateway_receivers() {
+      static std::map<waos::observable::StreamReceiver*, GatewayObservable*> index;
+      return index;
+    }
 
     class GatewayObservable
       : public waos::observable::Observable<waos::observable::BinaryEntry>,
@@ -37,7 +47,13 @@ namespace waos {
             mode_(mode),
             set_paused_(std::move(set_paused)),
             detach_(std::move(detach)),
-            since_(since) {}
+            since_(since) {
+          gateway_receivers()[static_cast<waos::observable::StreamReceiver*>(this)] = this;
+        }
+
+        ~GatewayObservable() override {
+          gateway_receivers().erase(static_cast<waos::observable::StreamReceiver*>(this));
+        }
 
         std::optional<std::uint64_t> last_wire_stream_id() const {
           return last_wire_stream_id_;

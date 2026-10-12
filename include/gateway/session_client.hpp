@@ -334,8 +334,9 @@ namespace waos {
         void bind_receiver(std::uint32_t socket_id, waos::observable::StreamReceiver* receiver) {
           if(!receiver) return;
           ensure_virtual(socket_id).mux().attachReceiver(socket_id, receiver);
-          if(auto* go = dynamic_cast<GatewayObservable*>(receiver)) {
-            go->set_mux_socket_id(socket_id);
+          auto found = gateway_receivers().find(receiver);
+          if(found != gateway_receivers().end()) {
+            found->second->set_mux_socket_id(socket_id);
           }
         }
 

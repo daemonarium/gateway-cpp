@@ -1,0 +1,20 @@
+gateway-cpp
+Copyright (c) 2026 Magowie Sp. z o.o.
+
+This library uses C++26 static reflection (P2996). It must be built
+with the reflection-toolchain sysroot:
+https://github.com/daemonarium/reflection-toolchain
+
+It links cpp_rpc from daemonarium/rpc-cpp:
+https://github.com/daemonarium/rpc-cpp
+
+Reflection support comes from Bloomberg's clang-p2996 and its libcxx
+(Apache License 2.0 with LLVM Exceptions), distributed via the
+toolchain repo. This repository does not bundle that compiler.
+
+include/xxhash.h is xxHash, Copyright (c) 2012-2023 Yann Collet,
+BSD 2-Clause License:
+https://github.com/Cyan4973/xxHash
+
+Unit tests use boost-ext/ut, Boost Software License 1.0:
+https://github.com/boost-ext/ut

@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/rpc-cpp
+          ref: v0.1.0
+          path: extern/rpc-cpp
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/reflection-toolchain
+          ref: v0.1.0
+          path: reflection-toolchain
+      - uses: actions/cache@v4
+        id: sysroot
+        with:
+          path: reflection-toolchain/sysroot
+          key: sysroot-v0.1.0-${{ hashFiles('reflection-toolchain/upstream-commits.txt') }}
+      - name: Build sysroot
+        if: steps.sysroot.outputs.cache-hit != 'true'
+        working-directory: reflection-toolchain
+        run: ./build-sysroot.sh
+      - name: Configure and test
+        env:
+          P2996_COMPILER_SYSROOT: ${{ github.workspace }}/reflection-toolchain/sysroot
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/p2996-toolchain.cmake"
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
+  wasm:
+    runs-on: ubuntu-22.04
+    needs: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/rpc-cpp
+          ref: v0.1.0
+          path: extern/rpc-cpp
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/reflection-toolchain
+          ref: v0.1.0
+          path: reflection-toolchain
+      - uses: actions/cache@v4
+        id: sysroot
+        with:
+          path: reflection-toolchain/sysroot
+          key: sysroot-v0.1.0-${{ hashFiles('reflection-toolchain/upstream-commits.txt') }}
+      - name: Build sysroot
+        if: steps.sysroot.outputs.cache-hit != 'true'
+        working-directory: reflection-toolchain
+        run: ./build-sysroot.sh
+      - name: Configure and build the module
+        env:
+          P2996_COMPILER_SYSROOT: ${{ github.workspace }}/reflection-toolchain/sysroot
+        run: |
+          cmake -B build-web -S . \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/emscripten-p2996-toolchain.cmake" \
+            -DWASM=ON
+          cmake --build build-web
+      - name: Exported rpc_description
+        run: node -e '
+          const fs = require("fs")
+          const buf = fs.readFileSync("build-web/gateway-session.wasm")
+          if (!buf.includes(Buffer.from("rpc_description"))) {
+            console.error("gateway-session.wasm does not export rpc_description")
+            process.exit(1)
+          }
+          console.log("OK rpc_description")
+        '

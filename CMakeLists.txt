@@ -6,13 +6,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT TARGET cpp_rpc)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/extern/rpc-cpp/CMakeLists.txt)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extern/rpc-cpp cpp_rpc)
-  else()
-    message(FATAL_ERROR
-      "cpp_rpc not found. Add rpc-cpp at extern/rpc-cpp before configuring gateway-cpp.")
-  endif()
+  include(FetchContent)
+  FetchContent_Declare(cpp_rpc
+    GIT_REPOSITORY https://github.com/daemonarium/rpc-cpp.git
+    GIT_TAG v0.2.0
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(cpp_rpc)
 endif()
+set(RPC_CPP_DIR ${cpp_rpc_SOURCE_DIR})
 
 add_library(gateway_cpp STATIC
   src/module_main.cpp
@@ -62,38 +64,52 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endforeach()
   endif()
 
-  if(WASM)
-    add_executable(gateway_session_wasm
-      src/module_main.cpp
-      ${cpp_rpc_SOURCE_DIR}/src/utils/socket_handlers.cpp
-    )
-    target_link_libraries(gateway_session_wasm PRIVATE cpp_rpc)
-    target_include_directories(gateway_session_wasm PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    target_compile_definitions(gateway_session_wasm PRIVATE
-      RPC_SERVER RPC_TYPE_DESCRIPTION
-    )
-    target_compile_options(gateway_session_wasm PRIVATE -fwasm-exceptions)
-    target_link_options(gateway_session_wasm PRIVATE
-      -s STANDALONE_WASM=1
-      -fwasm-exceptions
-      -mbulk-memory
-      -Wl,--import-memory
-      --no-entry
-      -sALLOW_MEMORY_GROWTH=1
-      -sINITIAL_MEMORY=2MB
-      -sTOTAL_STACK=64000
-      -sEXPORTED_FUNCTIONS=_rpc_description,_start,_malloc,_waos_socket_data,_waos_socket_output_drain
-      -sERROR_ON_UNDEFINED_SYMBOLS=0
-      -Wl,--allow-undefined-file=${cpp_rpc_SOURCE_DIR}/src/examples/modules/allowed-undefined-symbols.syms
-    )
-    set_target_properties(gateway_session_wasm PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-      OUTPUT_NAME gateway-session
-      SUFFIX ".wasm"
-    )
-  endif()
-
   enable_testing()
+endif()
+
+# The session module and the client objects are part of the wasm build from the
+# stack root as well as from this directory on its own. Native tests stay above.
+if(WASM)
+  aux_source_directory(${cpp_rpc_SOURCE_DIR}/src/io GATEWAY_IO_FILES)
+  aux_source_directory(${cpp_rpc_SOURCE_DIR}/src/socket GATEWAY_SOCKET_FILES)
+  add_library(gateway_session_client_lib OBJECT
+    ${cpp_rpc_SOURCE_DIR}/src/utils/socket_handlers.cpp
+    ${GATEWAY_IO_FILES}
+    ${GATEWAY_SOCKET_FILES}
+  )
+  target_include_directories(gateway_session_client_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${cpp_rpc_SOURCE_DIR}/src
+  )
+
+  add_executable(gateway_session_wasm
+    src/module_main.cpp
+    ${cpp_rpc_SOURCE_DIR}/src/utils/socket_handlers.cpp
+  )
+  target_link_libraries(gateway_session_wasm PRIVATE cpp_rpc)
+  target_include_directories(gateway_session_wasm PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_definitions(gateway_session_wasm PRIVATE
+    RPC_SERVER RPC_TYPE_DESCRIPTION
+  )
+  target_compile_options(gateway_session_wasm PRIVATE -fwasm-exceptions)
+  target_link_options(gateway_session_wasm PRIVATE
+    -s STANDALONE_WASM=1
+    -fwasm-exceptions
+    -mbulk-memory
+    -Wl,--import-memory
+    --no-entry
+    -sALLOW_MEMORY_GROWTH=1
+    -sINITIAL_MEMORY=2MB
+    -sTOTAL_STACK=64000
+    -sEXPORTED_FUNCTIONS=_rpc_description,_start,_malloc,_waos_socket_data,_waos_socket_output_drain
+    -sERROR_ON_UNDEFINED_SYMBOLS=0
+    -Wl,--allow-undefined-file=${cpp_rpc_SOURCE_DIR}/src/examples/modules/allowed-undefined-symbols.syms
+  )
+  set_target_properties(gateway_session_wasm PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    OUTPUT_NAME gateway-session
+    SUFFIX ".wasm"
+  )
 endif()
